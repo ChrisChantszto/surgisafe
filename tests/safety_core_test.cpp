@@ -1,59 +1,36 @@
 // Host-side unit tests for the portable safety core. No QNX required:
 //   make test
+//
+// Test names are tagged with the safety requirement they verify; see
+// docs/HAZARDS.md for the requirement list.
 
 #include "safety_core.hpp"
+#include "test_framework.hpp"
 
 #include <algorithm>
-#include <cstdio>
-#include <functional>
 #include <limits>
 #include <string_view>
-#include <vector>
 
 using namespace surgisafe;
+using testing::FakeClock;
 
 namespace {
 
-int g_failures = 0;
-
-#define CHECK(cond)                                                       \
-    do {                                                                  \
-        if (!(cond)) {                                                    \
-            std::fprintf(stderr, "  %s:%d: CHECK(%s) failed\n", __FILE__, \
-                         __LINE__, #cond);                                \
-            ++g_failures;                                                 \
-        }                                                                 \
-    } while (0)
-
-struct TestCase {
-    const char* name;
-    std::function<void()> fn;
-};
-
-std::vector<TestCase>& registry() {
-    static std::vector<TestCase> tests;
-    return tests;
-}
-
-struct Register {
-    Register(const char* name, std::function<void()> fn) {
-        registry().push_back({name, std::move(fn)});
-    }
-};
-
-#define TEST(name)                                     \
-    void name();                                       \
-    const Register register_##name{#name, name};       \
-    void name()
-
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr double kInf = std::numeric_limits<double>::infinity();
+constexpr std::uint64_t kCycleMs = 10;  // Controller period.
+
+// Sends a request 10 ms after the previous one (a healthy controller).
+Decision send(SafetyCore& core, FakeClock& clock, std::uint32_t cycle,
+              double proposed) {
+    return core.on_request(cycle, proposed, clock.advance_ms(kCycleMs));
+}
 
 // Expects a request to be rejected with `reason` and leave state untouched.
-void expect_rejected(SafetyCore& core, std::uint32_t cycle, double proposed,
-                     StopReason reason) {
+void expect_rejected(SafetyCore& core, FakeClock& clock, std::uint32_t cycle,
+                     double proposed, StopReason reason) {
     const double before = core.position();
-    const Decision d = core.on_request(cycle, proposed);
+    const Decision d = send(core, clock, cycle, proposed);
     CHECK(!d.permitted);
     CHECK(d.reason == reason);
     CHECK(d.actual_position == before);
@@ -74,11 +51,12 @@ TEST(starts_unarmed_at_origin) {
     CHECK(core.stop_reason() == StopReason::None);
 }
 
-// --- Accepted motion -------------------------------------------------------
+// --- SR-1: only bounded steps are committed --------------------------------
 
-TEST(valid_step_is_committed) {
+TEST(sr1_valid_step_is_committed) {
     SafetyCore core;
-    const Decision d = core.on_request(0, 0.05);
+    FakeClock clock;
+    const Decision d = send(core, clock, 0, 0.05);
     CHECK(d.permitted);
     CHECK(d.reason == StopReason::None);
     CHECK(d.actual_position == 0.05);
@@ -88,28 +66,37 @@ TEST(valid_step_is_committed) {
     CHECK(core.watchdog_should_run());
 }
 
-TEST(zero_step_is_allowed) {
+TEST(sr1_zero_step_is_allowed) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.0).permitted);
-    CHECK(core.on_request(1, 0.0).permitted);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.0).permitted);
+    CHECK(send(core, clock, 1, 0.0).permitted);
 }
 
-TEST(exact_max_step_is_allowed_both_directions) {
+TEST(sr1_exact_max_step_is_allowed_both_directions) {
     SafetyCore core;
-    CHECK(core.on_request(0, kMaxStep).permitted);
-    CHECK(core.on_request(1, 2 * kMaxStep).permitted);
-    CHECK(core.on_request(2, kMaxStep).permitted);  // Step back down.
+    FakeClock clock;
+    CHECK(send(core, clock, 0, kMaxStep).permitted);
+    CHECK(send(core, clock, 1, 2 * kMaxStep).permitted);
+    CHECK(send(core, clock, 2, kMaxStep).permitted);  // Step back down.
 }
 
-TEST(controller_ramp_reaches_upper_limit) {
+TEST(sr1_step_too_large_is_rejected) {
+    SafetyCore core;
+    FakeClock clock;
+    expect_rejected(core, clock, 0, kMaxStep + 1e-6,
+                    StopReason::InvalidMotion);
+}
+
+TEST(sr1_controller_ramp_reaches_upper_limit) {
     // Mirrors controller.cpp: clamp toward the target each cycle.
     SafetyCore core;
+    FakeClock clock;
     double position = 0.0;
-    std::uint32_t cycle = 0;
-    for (; cycle < 100; ++cycle) {
+    for (std::uint32_t cycle = 0; cycle < 100; ++cycle) {
         const double command =
             std::clamp(kMaxPosition - position, -kMaxStep, kMaxStep);
-        const Decision d = core.on_request(cycle, position + command);
+        const Decision d = send(core, clock, cycle, position + command);
         CHECK(d.permitted);
         if (!d.permitted) return;
         position = d.actual_position;
@@ -118,136 +105,214 @@ TEST(controller_ramp_reaches_upper_limit) {
     CHECK(!core.stopped());
 }
 
-// --- Invalid motion --------------------------------------------------------
+// --- SR-2: position stays inside the workspace -----------------------------
 
-TEST(step_too_large_is_rejected) {
+TEST(sr2_negative_position_is_rejected) {
     SafetyCore core;
-    expect_rejected(core, 0, kMaxStep + 1e-6, StopReason::InvalidMotion);
+    FakeClock clock;
+    expect_rejected(core, clock, 0, -1e-6, StopReason::InvalidMotion);
 }
 
-TEST(negative_position_is_rejected) {
+TEST(sr2_above_upper_limit_is_rejected) {
     SafetyCore core;
-    expect_rejected(core, 0, -1e-6, StopReason::InvalidMotion);
-}
-
-TEST(above_upper_limit_is_rejected) {
-    SafetyCore core;
+    FakeClock clock;
     double position = 0.0;
     std::uint32_t cycle = 0;
     while (position < kMaxPosition) {
         position = std::min(position + kMaxStep, kMaxPosition);
-        CHECK(core.on_request(cycle++, position).permitted);
+        CHECK(send(core, clock, cycle++, position).permitted);
     }
-    expect_rejected(core, cycle, kMaxPosition + 1e-6,
+    expect_rejected(core, clock, cycle, kMaxPosition + 1e-6,
                     StopReason::InvalidMotion);
 }
 
-TEST(nan_is_rejected) {
+TEST(sr2_nan_is_rejected) {
     SafetyCore core;
-    expect_rejected(core, 0, kNaN, StopReason::InvalidMotion);
+    FakeClock clock;
+    expect_rejected(core, clock, 0, kNaN, StopReason::InvalidMotion);
 }
 
-TEST(positive_infinity_is_rejected) {
+TEST(sr2_positive_infinity_is_rejected) {
     SafetyCore core;
-    expect_rejected(core, 0, kInf, StopReason::InvalidMotion);
+    FakeClock clock;
+    expect_rejected(core, clock, 0, kInf, StopReason::InvalidMotion);
 }
 
-TEST(negative_infinity_is_rejected) {
+TEST(sr2_negative_infinity_is_rejected) {
     SafetyCore core;
-    expect_rejected(core, 0, -kInf, StopReason::InvalidMotion);
+    FakeClock clock;
+    expect_rejected(core, clock, 0, -kInf, StopReason::InvalidMotion);
 }
 
-TEST(motion_error_wins_over_sequence_error) {
+TEST(sr2_motion_error_wins_over_sequence_error) {
     SafetyCore core;
-    expect_rejected(core, 7, kNaN, StopReason::InvalidMotion);
+    FakeClock clock;
+    expect_rejected(core, clock, 7, kNaN, StopReason::InvalidMotion);
 }
 
-// --- Sequence --------------------------------------------------------------
+// --- SR-3: requests must arrive in order -----------------------------------
 
-TEST(first_cycle_must_be_zero) {
+TEST(sr3_first_cycle_must_be_zero) {
     SafetyCore core;
-    expect_rejected(core, 1, 0.0, StopReason::InvalidSequence);
+    FakeClock clock;
+    expect_rejected(core, clock, 1, 0.0, StopReason::InvalidSequence);
 }
 
-TEST(skipped_cycle_is_rejected) {
+TEST(sr3_skipped_cycle_is_rejected) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    expect_rejected(core, 2, 0.2, StopReason::InvalidSequence);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    expect_rejected(core, clock, 2, 0.2, StopReason::InvalidSequence);
 }
 
-TEST(replayed_cycle_is_rejected) {
+TEST(sr3_replayed_cycle_is_rejected) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    expect_rejected(core, 0, 0.1, StopReason::InvalidSequence);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    expect_rejected(core, clock, 0, 0.1, StopReason::InvalidSequence);
 }
 
-// --- Latching --------------------------------------------------------------
+// --- SR-4: a stop is latched with its first cause --------------------------
 
-TEST(stop_is_latched_and_keeps_first_reason) {
+TEST(sr4_stop_is_latched_and_keeps_first_reason) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    expect_rejected(core, 1, 5.0, StopReason::InvalidMotion);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    expect_rejected(core, clock, 1, 5.0, StopReason::InvalidMotion);
     // A perfectly valid follow-up is still refused with the original reason.
-    expect_rejected(core, 1, 0.2, StopReason::InvalidMotion);
+    expect_rejected(core, clock, 1, 0.2, StopReason::InvalidMotion);
     // A later, different kind of error does not overwrite the reason.
-    expect_rejected(core, 99, 0.2, StopReason::InvalidMotion);
+    expect_rejected(core, clock, 99, 0.2, StopReason::InvalidMotion);
     CHECK(!core.watchdog_should_run());
 }
 
-TEST(rejected_request_does_not_advance_cycle) {
+TEST(sr4_rejected_request_does_not_advance_cycle) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    core.on_request(1, 5.0);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    send(core, clock, 1, 5.0);
     CHECK(core.expected_cycle() == 1);
 }
 
-// --- Watchdog --------------------------------------------------------------
-
-TEST(watchdog_ignored_before_first_request) {
+TEST(sr4_watchdog_reason_survives_later_invalid_request) {
+    // Regression: the reported reason once depended on the validity of the
+    // current request rather than on what caused the stop.
     SafetyCore core;
-    core.on_watchdog_timeout();
-    CHECK(!core.stopped());
-    CHECK(core.on_request(0, 0.1).permitted);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    core.on_tick(clock.advance_ms(20));
+    expect_rejected(core, clock, 1, kNaN, StopReason::WatchdogTimeout);
 }
 
-TEST(watchdog_latches_after_arming) {
+TEST(sr4_watchdog_does_not_overwrite_earlier_stop) {
     SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    core.on_watchdog_timeout();
-    CHECK(core.stopped());
-    CHECK(!core.watchdog_should_run());
-    // The next (otherwise valid) request reports the watchdog as the cause.
-    expect_rejected(core, 1, 0.2, StopReason::WatchdogTimeout);
-}
-
-TEST(watchdog_reason_survives_later_invalid_request) {
-    // Regression: previously the reported reason depended on the validity
-    // of the current request rather than on what caused the stop.
-    SafetyCore core;
-    CHECK(core.on_request(0, 0.1).permitted);
-    core.on_watchdog_timeout();
-    expect_rejected(core, 1, kNaN, StopReason::WatchdogTimeout);
-}
-
-TEST(watchdog_does_not_overwrite_earlier_stop) {
-    SafetyCore core;
-    core.on_request(0, kNaN);
-    core.on_watchdog_timeout();
+    FakeClock clock;
+    send(core, clock, 0, kNaN);
+    core.on_tick(clock.advance_ms(1000));
     CHECK(core.stop_reason() == StopReason::InvalidMotion);
 }
 
-TEST(invalid_first_request_still_arms) {
+// --- SR-5: absolute heartbeat deadline -------------------------------------
+
+TEST(sr5_deadline_is_set_from_accepted_request) {
     SafetyCore core;
-    core.on_request(0, kNaN);
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    CHECK(core.deadline_ns() == clock.now + kWatchdogTimeoutNs);
+}
+
+TEST(sr5_watchdog_ignored_before_first_request) {
+    SafetyCore core;
+    FakeClock clock;
+    core.on_tick(clock.advance_ms(1000));
+    CHECK(!core.stopped());
+    CHECK(send(core, clock, 0, 0.1).permitted);
+}
+
+TEST(sr5_tick_before_deadline_is_harmless) {
+    // A stale or forged timer pulse must not stop a healthy controller.
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    core.on_tick(clock.now);
+    core.on_tick(clock.now + kWatchdogTimeoutNs);  // Exactly on deadline.
+    CHECK(!core.stopped());
+    CHECK(send(core, clock, 1, 0.2).permitted);
+}
+
+TEST(sr5_tick_after_deadline_latches) {
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    core.on_tick(core.deadline_ns() + 1);
+    CHECK(core.stopped());
+    CHECK(!core.watchdog_should_run());
+    expect_rejected(core, clock, 1, 0.2, StopReason::WatchdogTimeout);
+}
+
+TEST(sr5_late_request_is_rejected_without_a_tick) {
+    // The request itself enforces the deadline, even if the timer pulse
+    // has not been delivered or processed yet.
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    const double before = core.position();
+    const Decision d = core.on_request(1, 0.2, clock.advance_ms(20));
+    CHECK(!d.permitted);
+    CHECK(d.reason == StopReason::WatchdogTimeout);
+    CHECK(core.position() == before);
+}
+
+TEST(sr5_request_exactly_on_deadline_is_accepted) {
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    CHECK(core.on_request(1, 0.2, core.deadline_ns()).permitted);
+}
+
+TEST(sr5_late_wins_over_invalid_motion) {
+    // The missed heartbeat happened first, so it is the reported cause.
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, 0.1).permitted);
+    core.on_request(1, kNaN, clock.advance_ms(30));
+    CHECK(core.stop_reason() == StopReason::WatchdogTimeout);
+}
+
+TEST(sr5_injected_freeze_scenario) {
+    // Mirrors the controller's default run: 10 ms period, one extra 20 ms
+    // freeze before cycle 40.
+    SafetyCore core;
+    FakeClock clock;
+    double position = 0.0;
+    std::uint32_t cycle = 0;
+    for (; cycle < 40; ++cycle) {
+        position += kMaxStep;
+        CHECK(send(core, clock, cycle, position).permitted);
+    }
+    const std::uint64_t freeze_end = clock.advance_ms(kCycleMs + 20);
+    // The timer fires at the deadline, well before the frozen request.
+    core.on_tick(core.deadline_ns() + 1);
+    CHECK(core.stop_reason() == StopReason::WatchdogTimeout);
+    const Decision d = core.on_request(cycle, position + kMaxStep, freeze_end);
+    CHECK(!d.permitted);
+    CHECK(d.reason == StopReason::WatchdogTimeout);
+}
+
+TEST(sr5_invalid_first_request_still_arms) {
+    SafetyCore core;
+    FakeClock clock;
+    send(core, clock, 0, kNaN);
     CHECK(core.armed());
 }
 
-// --- Monitor fault ---------------------------------------------------------
+// --- SR-6: monitor faults fail safe ----------------------------------------
 
-TEST(fault_latches_even_before_arming) {
+TEST(sr6_fault_latches_even_before_arming) {
     SafetyCore core;
+    FakeClock clock;
     core.on_fault();
-    expect_rejected(core, 0, 0.1, StopReason::MonitorFault);
+    expect_rejected(core, clock, 0, 0.1, StopReason::MonitorFault);
 }
 
 // --- Misc ------------------------------------------------------------------
@@ -266,15 +331,4 @@ TEST(reason_names_and_wire_values) {
 
 } // namespace
 
-int main() {
-    int failed_tests = 0;
-    for (const TestCase& test : registry()) {
-        const int before = g_failures;
-        test.fn();
-        const bool ok = g_failures == before;
-        std::printf("[%s] %s\n", ok ? " OK " : "FAIL", test.name);
-        if (!ok) ++failed_tests;
-    }
-    std::printf("\n%zu tests, %d failed\n", registry().size(), failed_tests);
-    return failed_tests == 0 ? 0 : 1;
-}
+int main() { return testing::run_all(); }

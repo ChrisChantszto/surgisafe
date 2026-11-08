@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests (${{ matrix.os }}, ${{ matrix.cxx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+          - os: ubuntu-latest
+            cxx: clang++
+          - os: macos-latest
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run safety-core tests (ASan + UBSan)
+        run: make test CXX=${{ matrix.cxx }}
+
+  static-analysis:
+    name: Static analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Analyze portable sources
+        # Only the portable core and tests: the QNX sources need QNX headers.
+        run: >
+          cppcheck --std=c++17 --language=c++ --enable=warning,performance,portability
+          --error-exitcode=1 --inline-suppr --suppress=missingIncludeSystem
+          -I . -I tests safety_core.cpp tests/

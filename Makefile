@@ -15,9 +15,12 @@ HOST_CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Werror -g -O1 \
 CORE_SRC := safety_core.cpp
 CORE_HDR := safety_core.hpp
 
-$(BUILD)/safety_core_test: tests/safety_core_test.cpp $(CORE_SRC) $(CORE_HDR)
+TEST_SRC := tests/safety_core_test.cpp tests/property_test.cpp
+TEST_HDR := tests/test_framework.hpp
+
+$(BUILD)/safety_core_test: $(TEST_SRC) $(TEST_HDR) $(CORE_SRC) $(CORE_HDR)
 	@mkdir -p $(BUILD)
-	$(CXX) $(HOST_CXXFLAGS) tests/safety_core_test.cpp $(CORE_SRC) -o $@
+	$(CXX) $(HOST_CXXFLAGS) $(TEST_SRC) $(CORE_SRC) -o $@
 
 .PHONY: test
 test: $(BUILD)/safety_core_test

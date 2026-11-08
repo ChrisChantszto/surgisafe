@@ -21,20 +21,28 @@ void SafetyCore::latch(StopReason reason) {
     }
 }
 
-Decision SafetyCore::on_request(std::uint32_t cycle, double proposed) {
-    armed_ = true;
+bool SafetyCore::deadline_missed(std::uint64_t now_ns) const {
+    return armed_ && now_ns > deadline_ns_;
+}
 
+Decision SafetyCore::on_request(std::uint32_t cycle, double proposed,
+                                std::uint64_t now_ns) {
     if (!stopped()) {
         const bool motion_ok = std::isfinite(proposed) &&
                                proposed >= 0.0 && proposed <= kMaxPosition &&
                                std::fabs(proposed - position_) <=
                                    kMaxStep + kStepTolerance;
-        if (!motion_ok) {
+        if (deadline_missed(now_ns)) {
+            // Arrived late: the timer may not have been serviced yet, but
+            // the heartbeat was still missed.
+            latch(StopReason::WatchdogTimeout);
+        } else if (!motion_ok) {
             latch(StopReason::InvalidMotion);
         } else if (cycle != expected_cycle_) {
             latch(StopReason::InvalidSequence);
         }
     }
+    armed_ = true;
 
     if (stopped()) {
         return Decision{false, reason_, position_};
@@ -42,11 +50,12 @@ Decision SafetyCore::on_request(std::uint32_t cycle, double proposed) {
 
     position_ = proposed;  // Only the monitor commits the virtual movement.
     ++expected_cycle_;
+    deadline_ns_ = now_ns + kWatchdogTimeoutNs;
     return Decision{true, StopReason::None, position_};
 }
 
-void SafetyCore::on_watchdog_timeout() {
-    if (armed_) {
+void SafetyCore::on_tick(std::uint64_t now_ns) {
+    if (deadline_missed(now_ns)) {
         latch(StopReason::WatchdogTimeout);
     }
 }

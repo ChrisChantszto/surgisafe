@@ -1,15 +1,18 @@
 # SurgiSafe-RT
 
+[![CI](https://github.com/ChrisChantszto/surgisafe/actions/workflows/ci.yml/badge.svg)](https://github.com/ChrisChantszto/surgisafe/actions/workflows/ci.yml)
+
 **Educational QNX 8.0 surgical-instrument motion and safety simulation** (no clinical or physical-robot use).
 
 Two native QNX processes communicate via `name_attach`/`name_open` and
 `MsgSend`/`MsgReceive`/`MsgReply`:
 
 - `controller`: proposes a movement every 10 ms; optionally freezes for 20 ms at cycle 40.
-- `safety_monitor`: is the *sole owner* of the virtual instrument position; rejects invalid movement requests and latches a safe-stop state when a 15 ms message-receive timeout expires.
+- `safety_monitor`: is the *sole owner* of the virtual instrument position; rejects invalid movement requests and latches a safe-stop state when the controller misses its 15 ms heartbeat deadline. The watchdog is a QNX timer (`timer_create` + `SIGEV_PULSE_INIT`) armed with an absolute `CLOCK_MONOTONIC` deadline that delivers a pulse to the monitor's own channel.
 - `safety_core.hpp/.cpp`: portable, QNX-free decision logic (motion limits, sequence checks, latched safe-stop and its reason). The monitor feeds IPC and timer events into it.
 - `protocol.hpp`: QNX IPC message structures.
-- `tests/safety_core_test.cpp`: host unit tests for the safety core.
+- `tests/`: host unit tests and randomized property tests for the safety core.
+- `docs/HAZARDS.md`: hazards, safety requirements (SR-1…SR-7) and how each is verified.
 
 This is a **learning prototype**. It has not been compiled or validated on QNX in the generation environment. Neither physical actuator safety nor hard real-time behavior is demonstrated by this repository alone.
 
@@ -24,7 +27,7 @@ This is a **learning prototype**. It has not been compiled or validated on QNX i
 make test
 ```
 
-Builds and runs the safety-core tests on macOS or Linux with AddressSanitizer and UndefinedBehaviorSanitizer.
+Builds and runs the safety-core tests on macOS or Linux with AddressSanitizer and UndefinedBehaviorSanitizer. This includes randomized property tests that drive the core with hundreds of thousands of random (often hostile) events; set `SURGISAFE_SEED=<n>` to try different random sequences. CI runs the same tests on Linux (GCC and Clang) and macOS, plus `cppcheck`.
 
 ## Build (from QNX SDP environment)
 
@@ -45,12 +48,14 @@ Terminal B (fault injection):
 ./controller
 ```
 
-Expected behavior: accepted moves through cycle 39, then a 20 ms injected delay causes a receive timeout in the monitor; the next request is rejected with reason 1 (watchdog timeout) and the controller exits with status 1. Exact timing is host/target dependent. On QEMU, failure to trigger reliably may reflect virtualization scheduling behavior.
+Expected behavior: accepted moves through cycle 39, then a 20 ms injected delay makes the controller miss its heartbeat deadline and the watchdog pulse latches a safe stop; the next request is rejected with reason 1 (watchdog timeout) and the controller exits with status 1. Exact timing is host/target dependent. On QEMU, failure to trigger reliably may reflect virtualization scheduling behavior.
 
 For normal operation, restart the monitor (state is latched) and use:
 ```sh
 ./controller --normal
 ```
+
+When the controller finishes or exits, it stops sending heartbeats, so the monitor latches a watchdog stop about 15 ms later. This is intended: a silent controller is treated as a fault.
 
 ## Reply reason codes
 
@@ -66,11 +71,11 @@ The safe stop is latched: every later reply reports the reason that caused the *
 
 ## Design notes and limitations
 
-- Timeout is measured **from each MsgReceive call**, not from the most recent scheduled release or a hardware watchdog; pulses and scheduling delays can affect the observed time.
+- The heartbeat deadline is **absolute**: it is set to (time the last request was accepted + 15 ms), so unrelated messages or pulses cannot extend it. The deadline is checked both when the timer pulse arrives and when the next request arrives, so a late request is refused even if the pulse is still queued, and a stale or forged pulse cannot stop a healthy controller. This is still a software watchdog, not a hardware one, and the reaction time depends on scheduling.
 - `MsgSend` blocks the controller awaiting the monitor reply. No timeout is implemented on that block in this starter version.
 - The monitor assumes one controller and monotonic cycle numbers; it doesn't authenticate a remote client or detect forged requests.
 - No motor driver, independent physical safety circuit, or clinical safety assurance is included.
-- In a real safety-rated system, implement and validate scheduling priorities, absolute deadlines, fault recovery, client identity, supervisor lifecycle and output inhibition.
+- In a real safety-rated system, implement and validate scheduling priorities, fault recovery, client identity, supervisor lifecycle and output inhibition.
 
 ## Next milestones
 
