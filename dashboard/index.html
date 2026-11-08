@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SurgiSafe-RT dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>SurgiSafe-RT</h1>
+      <p class="sub">Real-time safety guardian for an AI-guided instrument &middot; educational simulation, not for clinical use</p>
+    </div>
+  </div>
+  <div id="conn" class="pill pill-off">Connecting&hellip;</div>
+</header>
+
+<main>
+  <section class="stage">
+    <canvas id="workspace" width="640" height="640" aria-label="Workspace view: instrument tip, target and no-go zone"></canvas>
+    <div class="legend">
+      <span><i class="dot tip"></i>Instrument tip</span>
+      <span><i class="cross"></i>Planner target</span>
+      <span><i class="dot zone"></i>No-go zone</span>
+      <span><i class="line trail"></i>Path</span>
+    </div>
+  </section>
+
+  <aside>
+    <div id="status" class="card status status-off">
+      <div class="status-label" id="status-label">Waiting for simulator</div>
+      <div class="status-detail" id="status-detail">Start it with <code>make demo</code></div>
+      <button id="reset" class="primary" disabled>Operator reset</button>
+    </div>
+
+    <div class="card">
+      <h2>Who is steering?</h2>
+      <div class="segmented" role="radiogroup" aria-label="Planner">
+        <button data-mode="mouse" class="active" role="radio" aria-checked="true">Mouse</button>
+        <button data-mode="hand" role="radio" aria-checked="false">Hand (camera AI)</button>
+        <button data-mode="auto" role="radio" aria-checked="false">AI autopilot</button>
+        <button data-mode="drift" role="radio" aria-checked="false">Autopilot with error</button>
+      </div>
+      <p class="hint" id="mode-hint">Move the mouse over the workspace. The tip follows, within the limits.</p>
+      <div id="camera" class="camera" hidden>
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay" width="320" height="240"></canvas>
+        <div id="camera-msg" class="camera-msg">Starting camera&hellip;</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Inject a fault</h2>
+      <div class="buttons">
+        <button data-fault="freeze">Freeze controller 20 ms</button>
+        <button data-fault="kill">Crash controller</button>
+        <button data-fault="rogue">Rogue commands</button>
+      </div>
+      <p class="hint">The QNX monitor never trusts the controller. Every one of these ends in a latched safe stop.</p>
+    </div>
+
+    <div class="card stats">
+      <div><span id="s-cycle">0</span><label>Cycle</label></div>
+      <div><span id="s-accepted">0</span><label>Moves approved</label></div>
+      <div><span id="s-speed">0%</span><label>Speed vs limit</label></div>
+      <div><span id="s-controller">&ndash;</span><label>Controller</label></div>
+    </div>
+
+    <div class="card">
+      <h2>Event log</h2>
+      <ol id="log" class="log"></ol>
+    </div>
+  </aside>
+</main>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

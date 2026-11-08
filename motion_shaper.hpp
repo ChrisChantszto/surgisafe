@@ -49,6 +49,16 @@ public:
         return position_;
     }
 
+    // Decelerates toward standstill without heading anywhere (used to hold
+    // position when the target goes stale).
+    Point brake() {
+        const double s = std::hypot(velocity_.x, velocity_.y);
+        const double k = s > max_accel_ ? (s - max_accel_) / s : 0.0;
+        velocity_ = Point{velocity_.x * k, velocity_.y * k};
+        position_ = Point{position_.x + velocity_.x, position_.y + velocity_.y};
+        return position_;
+    }
+
     bool arrived(Point target, double eps = 1e-6) const {
         return distance(position_, target) < eps &&
                std::hypot(velocity_.x, velocity_.y) < eps;

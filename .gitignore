@@ -7,3 +7,6 @@
 /build/
 /controller
 /safety_monitor
+
+# Local editor/agent settings
+.claude/

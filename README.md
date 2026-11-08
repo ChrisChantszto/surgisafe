@@ -15,6 +15,9 @@ Two native QNX processes communicate via `name_attach`/`name_open` and
 - `motion_shaper.hpp`: controller-side helper that turns "go to this target" into steps within the speed and acceleration limits (with a 10% margin).
 - `scenarios.hpp/.cpp`: 14 deterministic fault-injection scenarios, shared by the host campaign and the QNX controller.
 - `tools/fault_campaign.cpp`: runs every scenario many times against the core in simulated time and writes a CSV report.
+- `live_controller.hpp/.cpp`: the interactive controller: a 10 ms loop toward the latest target, holding still when the target goes stale, plus demo faults (freeze, crash, rogue commands).
+- `dashboard/`: browser dashboard (the untrusted planner side): mouse, webcam hand tracking, AI autopilot.
+- `sim/sim_server.cpp` and `net/`: host simulator serving the dashboard over HTTP and a WebSocket, running the real safety core.
 - `protocol.hpp`: QNX IPC message structures.
 - `tests/`: host unit tests and randomized property tests for the safety core.
 - `docs/HAZARDS.md`: hazards, safety requirements (SR-1…SR-9) and how each is verified.
@@ -33,6 +36,20 @@ make test
 ```
 
 Builds and runs the safety-core tests on macOS or Linux with AddressSanitizer and UndefinedBehaviorSanitizer. This includes randomized property tests that drive the core with hundreds of thousands of random (often hostile) events; set `SURGISAFE_SEED=<n>` to try different random sequences. CI runs the same tests and the campaign on Linux (GCC and Clang) and macOS, plus `cppcheck`.
+
+## Live dashboard demo (no QNX needed)
+
+```sh
+make demo
+```
+
+Then open http://localhost:8080 in Chrome or Safari. The simulator runs the real `SafetyCore` and `LiveController` with a 10 ms loop; the browser is the untrusted planner.
+
+- **Who is steering:** *Mouse*; *Hand (camera AI)* (your index fingertip, tracked by Google MediaPipe running locally in the browser; video never leaves your machine, the model files are downloaded once from a CDN); *AI autopilot* (orbits a safe region); *Autopilot with error* (its orbit drifts into the no-go zone).
+- **Inject a fault:** freeze the controller for 20 ms, crash it, or make it send rogue commands. Each ends in a latched SAFE STOP with its reason; **Operator reset** re-enables motion.
+- **Two different "silences":** if the planner stops sending targets (mouse leaves the workspace, hand out of view), the controller brakes and **holds** — a safe pause, not a fault. If the controller itself stops sending heartbeats, the monitor's watchdog latches a **SAFE STOP**.
+
+The simulator listens on 127.0.0.1 only. Its timing is best-effort on macOS/Linux (the watchdog is checked about every millisecond), so it demonstrates behaviour, not real-time guarantees. On QNX, the same network code is intended to become a gateway process that forwards requests to `safety_monitor` with `MsgSend`.
 
 ## Fault-injection campaign (no QNX needed)
 
