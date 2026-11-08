@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     double position = 0.0;
     const double target = 8.0; // Do not deliberately violate the boundary.
     auto next_release = Clock::now();
+    int exit_code = 0;
 
     for (std::uint32_t cycle = 0; cycle < 100; ++cycle) {
         next_release += 10ms;
@@ -51,16 +52,19 @@ int main(int argc, char** argv) {
                                    &reply, sizeof(reply));
         if (result == -1) {
             std::perror("MsgSend");
+            exit_code = 1;
             break;
         }
         if (!reply.permitted) {
-            std::printf("SAFE_STOP: movement rejected (reason %d)\n",
-                        reply.reason);
+            std::printf("SAFE_STOP: movement rejected (reason %d: %s)\n",
+                        reply.reason,
+                        to_string(static_cast<StopReason>(reply.reason)));
+            exit_code = 1;
             break;
         }
         position = reply.actual_position;
         std::printf("Cycle %u | Virtual position %.2f\n", cycle, position);
     }
     name_close(connection);
-    return 0;
+    return exit_code;
 }

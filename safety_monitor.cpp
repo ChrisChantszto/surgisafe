@@ -1,16 +1,18 @@
 #include "protocol.hpp"
+#include "safety_core.hpp"
 
 #include <sys/dispatch.h>
+#include <sys/iomsg.h>
 #include <sys/neutrino.h>
 #include <cerrno>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
 
 using namespace surgisafe;
 
-// Buffer accommodates both a QNX pulse and our application request.
+// Buffer accommodates both a QNX pulse and our application request. Every
+// QNX message (including _IO_CONNECT) starts with a 16-bit type field.
 union ReceiveBuffer {
     std::uint16_t type;
     struct _pulse pulse;
@@ -24,38 +26,39 @@ int main() {
         return 1;
     }
 
-    double position = 0.0;
-    std::uint32_t expected_cycle = 0;
-    bool armed = false;
-    bool stopped = false;
+    SafetyCore core;
     std::puts("Safety monitor ready; awaiting controller");
     std::fflush(stdout);
 
     while (true) {
         ReceiveBuffer message{};
+        struct _msg_info info{};
 
         // This is a simple receive-inactivity watchdog. The timeout begins
         // when MsgReceive is entered, not at the previous cycle's release.
         // A production supervisor needs an absolute heartbeat deadline,
         // scheduler analysis, and a separately enforced actuator safe state.
-        if (armed && !stopped) {
-            const std::uint64_t timeout_ns = 15ULL * 1000 * 1000;
+        if (core.watchdog_should_run()) {
+            const std::uint64_t timeout_ns = kWatchdogTimeoutNs;
             if (TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_RECEIVE,
                              nullptr, &timeout_ns, nullptr) == -1) {
                 std::perror("TimerTimeout");
-                stopped = true;
+                core.on_fault();
+                std::puts("MONITOR FAULT: SAFE_STOP");
+                std::fflush(stdout);
             }
         }
 
         const int rcvid = MsgReceive(service->chid, &message,
-                                    sizeof(message), nullptr);
+                                     sizeof(message), &info);
         if (rcvid == -1) {
             if (errno == ETIMEDOUT) {
-                if (!stopped) {
+                const bool was_stopped = core.stopped();
+                core.on_watchdog_timeout();
+                if (!was_stopped && core.stopped()) {
                     std::puts("WATCHDOG TIMEOUT: SAFE_STOP");
                     std::fflush(stdout);
                 }
-                stopped = true;
                 continue;
             }
             if (errno == EINTR) continue;
@@ -68,30 +71,35 @@ int main() {
             }
             continue;
         }
+
+        // name_open() sends an _IO_CONNECT message first; it must get EOK
+        // or the client's name_open() fails.
+        if (message.type == _IO_CONNECT) {
+            MsgReply(rcvid, EOK, nullptr, 0);
+            continue;
+        }
         if (message.type != kMoveRequest) {
             MsgError(rcvid, ENOSYS);
             continue;
         }
+        // Reject truncated or oversized requests rather than reading a
+        // partially zero-filled struct.
+        if (info.srcmsglen != sizeof(MoveRequest)) {
+            MsgError(rcvid, EBADMSG);
+            continue;
+        }
 
-        armed = true;
+        const bool was_stopped = core.stopped();
         const MoveRequest& req = message.request;
-        const double next = req.proposed_position;
-        const bool valid = std::isfinite(next) &&
-                           next >= 0.0 && next <= kMaxPosition &&
-                           std::fabs(next - position) <= kMaxStep + 1e-9 &&
-                           req.cycle == expected_cycle;
-        if (!stopped && !valid) {
-            stopped = true;
-            std::puts("INVALID MOTION/SEQUENCE: SAFE_STOP");
+        const Decision decision =
+            core.on_request(req.cycle, req.proposed_position);
+        if (!was_stopped && core.stopped()) {
+            std::printf("%s: SAFE_STOP\n", to_string(core.stop_reason()));
         }
 
-        MoveReply reply{0, stopped ? (valid ? 1 : 2) : 0, position};
-        if (!stopped) {
-            position = next;  // Only monitor commits the virtual movement.
-            ++expected_cycle;
-            reply.permitted = 1;
-            reply.actual_position = position;
-        }
+        const MoveReply reply{decision.permitted ? 1 : 0,
+                              static_cast<std::int32_t>(decision.reason),
+                              decision.actual_position};
         if (MsgReply(rcvid, EOK, &reply, sizeof(reply)) == -1) {
             std::perror("MsgReply");
         }
