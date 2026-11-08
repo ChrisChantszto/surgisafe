@@ -17,17 +17,19 @@ struct MoveRequest {
     std::uint16_t type;
     std::uint16_t reserved;
     std::uint32_t cycle;
-    double proposed_position;
+    double x;  // Proposed tip position, workspace units.
+    double y;
 };
 
 struct MoveReply {
     std::int32_t permitted;
     std::int32_t reason;  // A StopReason value.
-    double actual_position;
+    double x;             // Actual tip position after the decision.
+    double y;
 };
 
 static_assert(std::is_trivially_copyable_v<MoveRequest>);
 static_assert(std::is_trivially_copyable_v<MoveReply>);
-static_assert(sizeof(MoveRequest) == 16, "wire layout changed");
-static_assert(sizeof(MoveReply) == 16, "wire layout changed");
+static_assert(sizeof(MoveRequest) == 24, "wire layout changed");
+static_assert(sizeof(MoveReply) == 24, "wire layout changed");
 } // namespace surgisafe

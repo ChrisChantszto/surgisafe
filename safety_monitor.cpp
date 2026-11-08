@@ -152,7 +152,7 @@ int main() {
         const bool was_stopped = core.stopped();
         const MoveRequest& req = message.request;
         const Decision decision =
-            core.on_request(req.cycle, req.proposed_position, now);
+            core.on_request(req.cycle, Point{req.x, req.y}, now);
 
         // Re-arm before replying, so the controller's next cycle is always
         // covered by the new deadline.
@@ -169,7 +169,7 @@ int main() {
         const bool permitted = decision.permitted && !core.stopped();
         const MoveReply reply{permitted ? 1 : 0,
                               static_cast<std::int32_t>(core.stop_reason()),
-                              core.position()};
+                              core.position().x, core.position().y};
         if (MsgReply(rcvid, EOK, &reply, sizeof(reply)) == -1) {
             std::perror("MsgReply");
         }

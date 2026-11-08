@@ -26,6 +26,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and run safety-core tests (ASan + UBSan)
         run: make test CXX=${{ matrix.cxx }}
+      - name: Run fault-injection campaign (simulated time)
+        run: make campaign CXX=${{ matrix.cxx }}
+      - name: Upload campaign results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-${{ matrix.os }}-${{ matrix.cxx }}
+          path: build/campaign.csv
 
   static-analysis:
     name: Static analysis (cppcheck)
@@ -39,4 +47,4 @@ jobs:
         run: >
           cppcheck --std=c++17 --language=c++ --enable=warning,performance,portability
           --error-exitcode=1 --inline-suppr --suppress=missingIncludeSystem
-          -I . -I tests safety_core.cpp tests/
+          -I . -I tests safety_core.cpp scenarios.cpp tools/ tests/
