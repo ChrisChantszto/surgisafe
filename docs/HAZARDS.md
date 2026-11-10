@@ -6,6 +6,10 @@ IEC 62304) to show how each safety rule traces to a hazard and to the
 evidence that it works. It is **not** a certified analysis, and the project
 must not be used with a real instrument or patient.
 
+Demo scenario: a remote, AI-assisted ultrasound robot. The instrument is
+the ultrasound probe, the tissue mound is the scan site on the patient's skin
+(H-9), and the no-go zone is a fresh surgical wound (H-8).
+
 The instrument tip moves in a 2D workspace (default 8 × 8 units, one
 circular no-go zone of radius 1 at (5, 5)). Limits are per 10 ms control
 cycle. All limits live in one `Envelope` struct ([safety_core.hpp](../safety_core.hpp)).

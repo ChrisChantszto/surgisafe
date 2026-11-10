@@ -6,6 +6,10 @@ instrument tip in that plane; a vertical slide raises and lowers the
 instrument. A soft tissue mound gives the instrument something to press
 against, which is what the contact-force rule (SR-10) is about.
 
+Demo scenario (remote ultrasound): the instrument is the ultrasound probe,
+the tissue mound is the scan site on the patient's skin, and the red no-go
+zone is a fresh surgical wound.
+
 Everything is defined here, in one place, so the bridge and the scene agree.
 """
 

@@ -1,5 +1,10 @@
 // SurgiSafe-RT dashboard.
 //
+// Scenario: a remote, AI-assisted ultrasound robot. The workspace is a top
+// view of the patient; the pink scan site is where the probe touches the
+// skin (pressure limit), and the red circle is a surgical wound the probe
+// must never enter (no-go zone).
+//
 // This page is the *untrusted planner* side: it picks targets (mouse, hand
 // tracking, or an autopilot) and sends them to the simulator / QNX gateway.
 // It never decides whether a move is safe; it only displays what the
@@ -36,6 +41,7 @@ function connect() {
       el.textContent = msg.source === 'qnx'
         ? 'Connected · decisions by QNX 8.0 safety monitor'
         : 'Connected · Mac simulator';
+      $('freeze-btn').textContent = `Network lag: freeze ${freezeMs()} ms`;
     }
     else if (msg.type === 'state') onState(msg);
     else if (msg.type === 'event') log(msg.level, msg.text);
@@ -72,13 +78,14 @@ function onState(s) {
   if (s.stopped) {
     const extra = s.reason === 'watchdog timeout' && s.silence_ms
       ? ` (${s.silence_ms.toFixed(1)} ms of silence)` : '';
-    setStatus('stop', 'SAFE STOP', `Reason: ${s.reason}${extra}. Motion latched off until operator reset.`);
+    const why = REASON_TEXT[s.reason] ? ` ${REASON_TEXT[s.reason]}.` : '';
+    setStatus('stop', 'SAFE STOP', `Reason: ${s.reason}${extra}.${why} Probe lifted; motion latched off until operator reset.`);
   } else if (s.controller === 'frozen' || s.controller === 'killed') {
     setStatus('hold', 'Controller silent', `Controller ${s.controller}; watchdog counting down…`);
   } else if (s.holding) {
-    setStatus('hold', 'HOLD', 'No fresh target from the planner. Holding position safely.');
+    setStatus('hold', 'HOLD', 'No fresh command from the operator or AI. Holding position safely.');
   } else {
-    setStatus('ok', 'MOTION OK', 'Following the planner target within every limit.');
+    setStatus('ok', 'MOTION OK', 'Following the operator / AI within every limit.');
   }
   $('reset').disabled = !s.stopped;
   // Faults only make sense while motion is enabled.
@@ -92,6 +99,24 @@ function onState(s) {
   $('s-speed').textContent = `${Math.round(speed * 100)}%`;
   $('s-controller').textContent = s.controller;
   updateForce(s);
+  rtOnState(s);
+}
+
+// Plain-language meaning of each stop reason in the ultrasound scenario.
+const REASON_TEXT = {
+  'watchdog timeout': 'The commands went silent (lag, freeze or crash)',
+  'contact force': 'The probe pressed on the skin too hard',
+  'no-go zone': 'The probe was about to enter the surgical wound',
+  'speed limit': 'A command asked the arm to move too fast',
+  'acceleration limit': 'A command asked for a sudden, jerky change of motion',
+  'out of workspace': 'A command pointed outside the patient area',
+  'invalid sequence': 'Commands arrived out of order (replayed or skipped)',
+};
+
+// Freeze long enough to pass the watchdog deadline (15 ms on hardware,
+// 50 ms on the QEMU profile).
+function freezeMs() {
+  return env ? Math.max(20, Math.ceil(env.timeout_ms * 2 / 10) * 10) : 20;
 }
 
 let forceSeen = false;
@@ -179,7 +204,7 @@ function draw() {
     ctx.fillStyle = '#e88c99';
     ctx.font = '12px -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('tissue', c.x, c.y + 4);
+    ctx.fillText('scan site', c.x, c.y + 4);
   }
 
   // No-go zones.
@@ -197,7 +222,9 @@ function draw() {
     ctx.fillStyle = '#e5534b';
     ctx.font = '12px -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('no-go zone', c.x, c.y + 4);
+    ctx.fillText('wound', c.x, c.y - 2);
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.fillText('no-scan zone', c.x, c.y + 12);
   }
 
   if (!state) return;
@@ -375,10 +402,10 @@ setInterval(() => {
 // ----------------------------------------------------------------- controls
 
 const hints = {
-  mouse: 'Move the mouse over the workspace. The tip follows, within the limits.',
-  hand: 'Your index fingertip steers the tip. Hide your hand and the controller holds.',
-  auto: 'An AI autopilot orbits a safe region on its own.',
-  drift: 'The autopilot has a planning bug: its orbit drifts toward the no-go zone.',
+  mouse: 'Move the mouse over the patient. The probe follows, within the limits.',
+  hand: 'Your index fingertip steers the probe, as a remote sonographer would. Hide your hand and the arm holds still.',
+  auto: 'An AI auto-scan sweeps the probe in circles over a safe area on its own.',
+  drift: 'The AI has a planning bug: its sweep slowly drifts toward the surgical wound.',
 };
 
 document.querySelectorAll('.segmented button').forEach((b) => {
@@ -397,7 +424,7 @@ document.querySelectorAll('.segmented button').forEach((b) => {
 document.querySelectorAll('[data-fault]').forEach((b) => {
   b.addEventListener('click', () => {
     const f = b.dataset.fault;
-    if (f === 'freeze') send({ cmd: 'freeze', ms: 20 });
+    if (f === 'freeze') send({ cmd: 'freeze', ms: freezeMs() });
     if (f === 'kill') send({ cmd: 'kill' });
     if (f === 'rogue') send({ cmd: 'rogue', on: true });
   });
@@ -408,6 +435,173 @@ $('reset').addEventListener('click', () => {
   trail.length = 0;
   autoStart = performance.now();  // Restart the autopilot's plan.
 });
+
+// ------------------------------------------------------ real-time proof
+
+// Per-cycle timing from the server, reduced to the worst value per 100 ms
+// bucket for the chart, plus worst-ever values without and with CPU stress.
+const RT_WINDOW_S = 20;
+const RT_BUCKET_MS = 100;
+const rtBuckets = [];  // { t, decide, late, stress } — values in µs.
+const rtCmp = {
+  off: { decide: 0, late: 0, n: 0 },
+  on: { decide: 0, late: 0, n: 0 },
+};
+let rtStress = false;
+
+function fmtUs(us) {
+  if (!(us >= 0)) return '–';
+  return us >= 1000 ? `${(us / 1000).toFixed(2)} ms` : `${Math.round(us)} µs`;
+}
+
+function rtOnState(s) {
+  if (s.decide_us === undefined) return;
+  const now = performance.now();
+  const key = Math.floor(now / RT_BUCKET_MS) * RT_BUCKET_MS;
+  let b = rtBuckets[rtBuckets.length - 1];
+  if (!b || b.t !== key) {
+    b = { t: key, decide: 0, late: 0, stress: false };
+    rtBuckets.push(b);
+    while (rtBuckets.length && rtBuckets[0].t < now - RT_WINDOW_S * 1000) rtBuckets.shift();
+  }
+  b.decide = Math.max(b.decide, s.decide_us);
+  b.late = Math.max(b.late, s.late_us);
+  b.stress = b.stress || s.stress;
+
+  const c = s.stress ? rtCmp.on : rtCmp.off;
+  c.decide = Math.max(c.decide, s.decide_us);
+  c.late = Math.max(c.late, s.late_us);
+  c.n++;
+
+  rtStress = s.stress;
+  const btn = $('stress');
+  btn.classList.toggle('on', s.stress);
+  btn.textContent = s.stress
+    ? `Stop the stress (${Math.ceil(s.stress_left)} s left)`
+    : 'Stress the CPU (60 s)';
+  $('rt-load').textContent = s.stress
+    ? `${s.stress_threads} threads${s.stress_low_prio ? ' · prio 5' : ''}` : 'off';
+  $('rt-load').title = s.stress
+    ? `${s.stress_mops.toFixed(0)} million loop iterations per second` : '';
+}
+
+// Updated a few times per second, not per message.
+setInterval(() => {
+  const recent = rtBuckets.filter((b) => b.t >= performance.now() - 1000);
+  const worst = (k) => recent.reduce((m, b) => Math.max(m, b[k]), 0);
+  if (recent.length) {
+    $('rt-decide').textContent = fmtUs(worst('decide'));
+    $('rt-late').textContent = fmtUs(worst('late'));
+  }
+  for (const k of ['off', 'on']) {
+    const c = rtCmp[k];
+    $(`cmp-decide-${k}`).textContent = c.n ? fmtUs(c.decide) : '–';
+    $(`cmp-late-${k}`).textContent = c.n ? fmtUs(c.late) : '–';
+    $(`cmp-n-${k}`).textContent = c.n.toLocaleString();
+  }
+  drawRt();
+}, 200);
+
+const rtCanvas = $('rt-canvas');
+const rctx = rtCanvas.getContext('2d');
+let rtHoverX = null;
+
+function niceCeil(v) {
+  const steps = [0.5, 1, 2, 5, 10, 20, 50, 100, 200];
+  return steps.find((s) => s >= v) || Math.ceil(v / 100) * 100;
+}
+
+function drawRt() {
+  const W = rtCanvas.width, H = rtCanvas.height;
+  const L = 84, R = 24, T = 12, B = 30;
+  const pw = W - L - R, ph = H - T - B;
+  const now = performance.now();
+  const t0 = now - RT_WINDOW_S * 1000;
+  const css = getComputedStyle(rtCanvas.closest('.rt'));
+  const cDecide = css.getPropertyValue('--decide').trim();
+  const cLate = css.getPropertyValue('--late').trim();
+  rctx.clearRect(0, 0, W, H);
+
+  // Y axis in ms, shared by both series (same unit).
+  const maxMs = rtBuckets.reduce((m, b) => Math.max(m, b.decide, b.late), 0) / 1000;
+  const top = niceCeil(Math.max(1, maxMs * 1.1));
+  const x = (t) => L + ((t - t0) / (RT_WINDOW_S * 1000)) * pw;
+  const y = (us) => T + ph - Math.min(1, us / 1000 / top) * ph;
+
+  // Stress bands.
+  rctx.fillStyle = 'rgba(139, 154, 165, 0.16)';
+  for (const b of rtBuckets) {
+    if (b.stress) rctx.fillRect(x(b.t), T, Math.max(1, x(b.t + RT_BUCKET_MS) - x(b.t)), ph);
+  }
+
+  // Grid + labels (recessive).
+  rctx.font = '20px -apple-system, sans-serif';
+  rctx.fillStyle = '#8b9aa5';
+  rctx.strokeStyle = '#24303a';
+  rctx.lineWidth = 1;
+  rctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const v = (top * i) / 4;
+    const yy = T + ph - (ph * i) / 4;
+    rctx.beginPath(); rctx.moveTo(L, yy); rctx.lineTo(W - R, yy); rctx.stroke();
+    rctx.fillText(`${+v.toFixed(2)} ms`, L - 6, yy + 6);
+  }
+  rctx.textAlign = 'center';
+  for (let sAgo = RT_WINDOW_S; sAgo >= 0; sAgo -= 5) {
+    rctx.textAlign = sAgo === 0 ? 'right' : 'center';
+    rctx.fillText(sAgo ? `−${sAgo} s` : 'now', sAgo === 0 ? W - R : x(now - sAgo * 1000), H - 6);
+  }
+
+  // Series: 2px lines.
+  for (const [key, color] of [['late', cLate], ['decide', cDecide]]) {
+    rctx.beginPath();
+    rtBuckets.forEach((b, i) => {
+      const px = x(b.t + RT_BUCKET_MS / 2), py = y(b[key]);
+      i ? rctx.lineTo(px, py) : rctx.moveTo(px, py);
+    });
+    rctx.strokeStyle = color;
+    rctx.lineWidth = 2.5;
+    rctx.lineJoin = 'round';
+    rctx.stroke();
+  }
+
+  // Hover crosshair + tooltip.
+  const tip = $('rt-tip');
+  if (rtHoverX === null || !rtBuckets.length) { tip.hidden = true; return; }
+  const th = t0 + ((rtHoverX - L) / pw) * RT_WINDOW_S * 1000;
+  let best = null;
+  for (const b of rtBuckets) {
+    if (!best || Math.abs(b.t - th) < Math.abs(best.t - th)) best = b;
+  }
+  if (!best) { tip.hidden = true; return; }
+  const hx = x(best.t + RT_BUCKET_MS / 2);
+  rctx.strokeStyle = '#8b9aa5';
+  rctx.lineWidth = 1;
+  rctx.beginPath(); rctx.moveTo(hx, T); rctx.lineTo(hx, T + ph); rctx.stroke();
+  for (const [key, color] of [['late', cLate], ['decide', cDecide]]) {
+    rctx.beginPath();
+    rctx.arc(hx, y(best[key]), 5, 0, Math.PI * 2);
+    rctx.fillStyle = color; rctx.fill();
+    rctx.strokeStyle = '#171e24'; rctx.lineWidth = 2; rctx.stroke();
+  }
+  const ago = ((now - best.t) / 1000).toFixed(1);
+  tip.textContent = `${ago} s ago${best.stress ? ' · stress on' : ''} — decision ${fmtUs(best.decide)}, start delay ${fmtUs(best.late)}`;
+  tip.hidden = false;
+  const scale = rtCanvas.getBoundingClientRect().width / W;
+  const left = hx * scale;
+  tip.style.left = `${Math.max(0, Math.min(left - tip.offsetWidth / 2, rtCanvas.getBoundingClientRect().width - tip.offsetWidth))}px`;
+}
+
+rtCanvas.addEventListener('mousemove', (e) => {
+  const r = rtCanvas.getBoundingClientRect();
+  rtHoverX = (e.clientX - r.left) * (rtCanvas.width / r.width);
+  drawRt();
+});
+rtCanvas.addEventListener('mouseleave', () => { rtHoverX = null; drawRt(); });
+
+$('stress').addEventListener('click', () => send({ cmd: 'stress', on: !rtStress }));
+
+$('story-close').addEventListener('click', () => { $('story').hidden = true; });
 
 connect();
 draw();

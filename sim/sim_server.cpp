@@ -11,6 +11,7 @@
 //
 // Timing in this simulator is macOS/Linux best-effort, not real-time.
 
+#include "cpu_stress.hpp"
 #include "live_controller.hpp"
 #include "net/json_util.hpp"
 #include "net/ws_server.hpp"
@@ -129,6 +130,8 @@ int main(int argc, char** argv) {
 
     Sim sim;
     std::uint32_t last_cycle = 0;  // Last cycle sent; used in stop reports.
+    CpuStress stress;
+    constexpr std::uint64_t kStressDurationNs = 60'000'000'000ULL;
     auto notify = [&](const char* level, const std::string& text) {
         std::printf("[%s] %s\n", level, text.c_str());
         std::fflush(stdout);
@@ -204,6 +207,18 @@ int main(int argc, char** argv) {
             sim.ctl->set_rogue(on);
             notify("fault", on ? "Controller compromised: rogue commands"
                                : "Rogue commands off");
+        } else if (cmd == "stress") {
+            bool on = true;
+            json_bool(msg, "on", on);
+            if (on && !stress.running()) {
+                const int n = stress.start(now_ns(), kStressDurationNs);
+                notify("info", "CPU stress ON: " + std::to_string(n) +
+                                   " busy threads for 60 s (macOS: normal "
+                                   "priority; the control loop is real-time)");
+            } else if (!on && stress.running()) {
+                stress.stop();
+                notify("info", "CPU stress OFF");
+            }
         }
     };
 
@@ -222,19 +237,24 @@ int main(int argc, char** argv) {
         }
 
         if (now < next_release) continue;
+        const double late_us = (now - next_release) / 1e3;
         next_release += kPeriodNs;
         if (next_release + 100 * kPeriodNs < now) {
             next_release = now + kPeriodNs;  // Resync after a long pause.
         }
 
+        if (stress.expire(now)) notify("info", "CPU stress OFF (60 s limit)");
         std::uint32_t cycle = 0;
         Point proposal{};
+        double decide_us = 0.0;
         // A stopped monitor gets no more requests: the controller in the
         // QNX build exits on SAFE_STOP; here it simply waits for a reset.
         if (!sim.core->stopped() &&
             sim.ctl->make_request(now, cycle, proposal)) {
             last_cycle = cycle;
+            const std::uint64_t t0 = now_ns();
             const Decision d = sim.core->on_request(cycle, proposal, now);
+            decide_us = (now_ns() - t0) / 1e3;
             if (d.permitted) {
                 ++sim.accepted;
                 sim.last_accept_ns = now;
@@ -257,6 +277,13 @@ int main(int argc, char** argv) {
         t.stops = sim.stops;
         t.silence_ms = sim.last_silence_ms;
         t.force = sim.core->last_force();
+        t.decide_us = decide_us;
+        t.late_us = late_us;
+        t.stress = stress.running();
+        t.stress_threads = stress.threads();
+        t.stress_low_prio = stress.low_priority();
+        t.stress_mops = stress.work_rate(now);
+        t.stress_left_s = stress.seconds_left(now);
         server.send_text(state_json(t));
     }
     std::printf("Simulator stopped\n");

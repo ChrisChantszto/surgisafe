@@ -108,23 +108,37 @@ struct Telemetry {
     std::uint64_t stops = 0;
     double silence_ms = 0.0;
     double force = 0.0;
+    // Real-time measurements for this cycle (see "Stress the CPU").
+    double decide_us = 0.0;   // Time to get the safety decision.
+    double late_us = 0.0;     // How late the control cycle started.
+    // Background CPU load (CpuStress).
+    bool stress = false;
+    int stress_threads = 0;
+    bool stress_low_prio = false;
+    double stress_mops = 0.0;  // Work done by the load, M iterations/s.
+    double stress_left_s = 0.0;
 };
 
 inline std::string state_json(const Telemetry& t) {
-    char buf[600];
+    char buf[1000];
     std::snprintf(
         buf, sizeof buf,
         "{\"type\":\"state\",\"cycle\":%u,\"x\":%.5f,\"y\":%.5f,"
         "\"vx\":%.5f,\"vy\":%.5f,\"tx\":%.5f,\"ty\":%.5f,"
         "\"has_target\":%s,\"stopped\":%s,\"reason\":\"%s\",\"code\":%d,"
         "\"holding\":%s,\"controller\":\"%s\",\"accepted\":%llu,"
-        "\"stops\":%llu,\"silence_ms\":%.3f,\"force\":%.3f}",
+        "\"stops\":%llu,\"silence_ms\":%.3f,\"force\":%.3f,"
+        "\"decide_us\":%.1f,\"late_us\":%.1f,\"stress\":%s,"
+        "\"stress_threads\":%d,\"stress_low_prio\":%s,"
+        "\"stress_mops\":%.1f,\"stress_left\":%.1f}",
         t.cycle, t.position.x, t.position.y, t.velocity.x, t.velocity.y,
         t.target.x, t.target.y, t.has_target ? "true" : "false",
         t.stopped ? "true" : "false", to_string(t.reason),
         static_cast<int>(t.reason), t.holding ? "true" : "false",
         to_string(t.controller), static_cast<unsigned long long>(t.accepted),
-        static_cast<unsigned long long>(t.stops), t.silence_ms, t.force);
+        static_cast<unsigned long long>(t.stops), t.silence_ms, t.force,
+        t.decide_us, t.late_us, t.stress ? "true" : "false", t.stress_threads,
+        t.stress_low_prio ? "true" : "false", t.stress_mops, t.stress_left_s);
     return buf;
 }
 

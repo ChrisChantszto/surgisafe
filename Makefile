@@ -23,6 +23,8 @@ SCEN_HDR := scenarios.hpp
 
 LIVE_SRC := live_controller.cpp
 LIVE_HDR := live_controller.hpp
+STRESS_SRC := cpu_stress.cpp
+STRESS_HDR := cpu_stress.hpp
 NET_SRC  := net/sha1.cpp net/ws_server.cpp
 NET_HDR  := net/sha1.hpp net/ws_server.hpp
 
@@ -41,9 +43,9 @@ $(BUILD)/fault_campaign: tools/fault_campaign.cpp $(SCEN_SRC) $(SCEN_HDR) $(CORE
 # to what it will be on QNX.
 SIM_CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2 -I.
 
-$(BUILD)/sim_server: sim/sim_server.cpp $(LIVE_SRC) $(LIVE_HDR) $(NET_SRC) $(NET_HDR) $(CORE_SRC) $(CORE_HDR)
+$(BUILD)/sim_server: sim/sim_server.cpp $(LIVE_SRC) $(LIVE_HDR) $(NET_SRC) $(NET_HDR) net/json_util.hpp $(STRESS_SRC) $(STRESS_HDR) $(CORE_SRC) $(CORE_HDR)
 	@mkdir -p $(BUILD)
-	$(CXX) $(SIM_CXXFLAGS) sim/sim_server.cpp $(LIVE_SRC) $(NET_SRC) $(CORE_SRC) -o $@
+	$(CXX) $(SIM_CXXFLAGS) sim/sim_server.cpp $(LIVE_SRC) $(NET_SRC) $(STRESS_SRC) $(CORE_SRC) -pthread -o $@
 
 PORT ?= 8080
 .PHONY: demo sim
@@ -95,9 +97,9 @@ $(BUILD)/qnx/safety_core_test: $(TEST_SRC) $(TEST_HDR) $(CORE_SRC) $(CORE_HDR) $
 
 # Network gateway: serves the dashboard and forwards to safety_monitor.
 # QNX keeps socket functions in libsocket.
-$(BUILD)/qnx/qnx_gateway: qnx_gateway.cpp $(LIVE_SRC) $(LIVE_HDR) $(NET_SRC) $(NET_HDR) net/json_util.hpp $(CORE_SRC) $(CORE_HDR) protocol.hpp
+$(BUILD)/qnx/qnx_gateway: qnx_gateway.cpp $(LIVE_SRC) $(LIVE_HDR) $(NET_SRC) $(NET_HDR) net/json_util.hpp $(STRESS_SRC) $(STRESS_HDR) $(CORE_SRC) $(CORE_HDR) protocol.hpp
 	@mkdir -p $(BUILD)/qnx
-	$(QCC) $(QNX_CXXFLAGS) qnx_gateway.cpp $(LIVE_SRC) $(NET_SRC) $(CORE_SRC) -lsocket -o $@
+	$(QCC) $(QNX_CXXFLAGS) qnx_gateway.cpp $(LIVE_SRC) $(NET_SRC) $(STRESS_SRC) $(CORE_SRC) -lsocket -o $@
 
 .PHONY: qnx
 qnx: $(BUILD)/qnx/safety_monitor $(BUILD)/qnx/controller $(BUILD)/qnx/safety_core_test $(BUILD)/qnx/qnx_gateway

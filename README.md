@@ -4,6 +4,18 @@
 
 **Educational QNX 8.0 surgical-instrument motion and safety simulation** (no clinical or physical-robot use).
 
+**The scenario: a remote, AI-assisted ultrasound robot.** A sonographer in another city scans a patient through a robot arm, steering the ultrasound probe with hand gestures (webcam hand tracking) or letting an AI auto-scan. The probe must press on the skin gently (at most 5 N) and must never enter a fresh surgical wound (a no-go zone). Neither the AI nor the network is trusted: a QNX safety monitor checks every single move and latches a safe stop when a rule is broken or the commands go silent. *AI proposes, QNX decides.*
+
+| In the demo | Stands for |
+|---|---|
+| Instrument tip | Ultrasound probe |
+| Pink tissue mound (MuJoCo physics) | Scan site: the probe touches the skin here; contact force limit 5 N |
+| Red no-go zone | Surgical wound: the probe must never enter it |
+| Watchdog | Network lag, a frozen or crashed controller |
+| Rogue commands | A hacked or buggy controller |
+
+The motion limits are scaled for a visible demo (0.1 units = 5 mm per 10 ms cycle is 0.5 m/s, much faster than a clinical robot would move).
+
 A virtual instrument tip moves in a 2D workspace. An untrusted controller proposes every move; a small QNX safety monitor decides whether it happens. The monitor enforces a *safety envelope*: workspace bounds, a speed limit, an acceleration limit, no-go zones (simple "virtual fixtures"), in-order cycle numbers and a heartbeat deadline (15 ms on the `hardware` timing profile, the design target; 50 ms on the `qemu` profile used under QEMU software emulation). Any violation latches a safe stop.
 
 Two native QNX processes communicate via `name_attach`/`name_open` and
@@ -18,13 +30,14 @@ Two native QNX processes communicate via `name_attach`/`name_open` and
 - `live_controller.hpp/.cpp`: the interactive controller: a 10 ms loop toward the latest target, holding still when the target goes stale, plus demo faults (freeze, crash, rogue commands).
 - `dashboard/`: browser dashboard (the untrusted planner side): mouse, webcam hand tracking, AI autopilot.
 - `sim/sim_server.cpp` and `net/`: host simulator serving the dashboard over HTTP and a WebSocket, running the real safety core.
+- `cpu_stress.hpp/.cpp`: low-priority background CPU load for the "Stress the CPU" demo.
 - `qnx_gateway.cpp`: the same dashboard protocol on QNX, forwarding every move, force reading and reset to `safety_monitor` with `MsgSend` (`make qnx-live`).
 - `sim/mujoco/`: MuJoCo robot arm (physics + contact force) that follows the approved positions.
 - `protocol.hpp`: QNX IPC message structures.
 - `tests/`: host unit tests and randomized property tests for the safety core.
-- `docs/HAZARDS.md`: hazards, safety requirements (SR-1…SR-9) and how each is verified.
+- `docs/HAZARDS.md`: hazards, safety requirements (SR-1…SR-10) and how each is verified.
 
-This is a **learning prototype**. It has not been compiled or validated on QNX in the generation environment. Neither physical actuator safety nor hard real-time behavior is demonstrated by this repository alone.
+This is a **learning prototype**. It builds and runs on QNX 8.0 (aarch64le, QEMU); see [qnx/README.md](qnx/README.md). Neither physical actuator safety nor hard real-time behavior is demonstrated by this repository alone.
 
 ## Requirements
 
@@ -52,6 +65,17 @@ Then open http://localhost:8080 in Chrome or Safari. The simulator runs the real
 - **Two different "silences":** if the planner stops sending targets (mouse leaves the workspace, hand out of view), the controller brakes and **holds** — a safe pause, not a fault. If the controller itself stops sending heartbeats, the monitor's watchdog latches a **SAFE STOP**.
 
 The simulator listens on 127.0.0.1 only. Its timing is best-effort on macOS/Linux (the watchdog is checked about every millisecond), so it demonstrates behaviour, not real-time guarantees. On QNX, the same network code is intended to become a gateway process that forwards requests to `safety_monitor` with `MsgSend`.
+
+## Real-time proof: stress the CPU
+
+The dashboard's **Stress the CPU (60 s)** button starts one busy-looping thread per CPU. On QNX they run at **priority 5**, below the gateway (50) and the safety monitor (60), so QNX's preemptive priority scheduler only gives them CPU time the safety path does not need. Every control cycle reports two measurements, charted live with stress periods shaded, plus a *without stress / with stress* table of the worst values:
+
+- **Safety decision time:** on QNX, the `MsgSend` round trip from the gateway to `safety_monitor` and back (on the Mac simulator, the in-process `SafetyCore` call).
+- **Cycle start delay:** how late each 10 ms cycle started compared with its schedule. The loop waits in `poll()` with 1 ms resolution, so about 1 ms of delay is normal with or without load.
+
+Measured on QNX 8.0 under QEMU (2 emulated CPUs, `qemu` profile, AI auto-scan running): during 60 s of stress (6,001 cycles, 2 load threads at priority 5 doing about 350 M iterations/s) there was **no safety stop**; the worst safety decision was 0.59 ms (2.54 ms without load) and the worst cycle start delay was 11.2 ms (5.5 ms without load), well inside the 50 ms deadline. The larger start delay under load is likely emulator noise (QEMU's own threads compete on the Mac); real hardware is needed to say more.
+
+The load switches itself off after 60 s. On macOS the load threads keep their normal priority and the simulator's loop uses Mach real-time scheduling instead. Under QEMU software emulation, emulator stalls still show up as occasional spikes with or without load: the comparison is meaningful, the absolute numbers are not real-time measurements.
 
 ## Robot arm in MuJoCo (no QNX needed)
 
@@ -141,8 +165,8 @@ The safe stop is latched: every later reply reports the reason that caused the *
 
 ## Next milestones
 
-1. Log measured controller start lateness, IPC round-trip time, and monitor response latency to CSV.
-2. Test QNX priorities and CPU load under QEMU (report the limitations of virtualized measurements).
+1. Run on real hardware (for example a Raspberry Pi 4 with QNX 8.0) to turn the timing measurements into real-time evidence.
+2. Log the live timing measurements to CSV for the report.
 3. Add independent service supervision and an explicit authenticated reset procedure.
 4. Add a separate visualization of the virtual instrument's accepted moves.
 

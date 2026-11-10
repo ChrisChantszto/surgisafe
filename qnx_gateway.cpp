@@ -13,11 +13,15 @@
 //   - when it is not sending moves (stopped, frozen, crashed) it asks the
 //     monitor for its status each cycle, so the monitor's own watchdog
 //     (a QNX timer pulse) is what detects a silent controller.
+// "Stress the CPU" starts low-priority busy threads (cpu_stress.hpp); every
+// cycle reports how long the monitor took to decide and how late the cycle
+// started, so the dashboard can show that the load does not disturb them.
 // Telemetry to the Mac reports the monitor's decisions.
 //
 // The gateway is untrusted from the monitor's point of view, exactly like
 // the scenario controller.
 
+#include "cpu_stress.hpp"
 #include "live_controller.hpp"
 #include "net/json_util.hpp"
 #include "net/ws_server.hpp"
@@ -172,6 +176,8 @@ int main(int argc, char** argv) {
     std::uint64_t accepted = 0, stops = 0, last_accept_ns = 0;
     double last_silence_ms = 0.0;
     std::uint32_t last_cycle = 0;
+    CpuStress stress;
+    constexpr std::uint64_t kStressDurationNs = 60'000'000'000ULL;
 
     auto notify = [&](const char* level, const std::string& text) {
         std::printf("[%s] %s\n", level, text.c_str());
@@ -246,6 +252,22 @@ int main(int argc, char** argv) {
             ctl.set_rogue(on);
             notify("fault", on ? "Gateway compromised: rogue commands to QNX"
                                : "Rogue commands off");
+        } else if (cmd == "stress") {
+            bool on = true;
+            json_bool(msg, "on", on);
+            if (on && !stress.running()) {
+                const int n = stress.start(now_ns(), kStressDurationNs);
+                notify("info", "CPU stress ON: " + std::to_string(n) +
+                                   " busy threads at priority " +
+                                   std::to_string(CpuStress::kLowPriority) +
+                                   (stress.low_priority()
+                                        ? " (safety monitor: 60, gateway: 50)"
+                                        : " (could not lower their priority)") +
+                                   ", for 60 s");
+            } else if (!on && stress.running()) {
+                stress.stop();
+                notify("info", "CPU stress OFF");
+            }
         }
     };
 
@@ -254,12 +276,15 @@ int main(int argc, char** argv) {
         server.poll(1);
         const std::uint64_t now = now_ns();
         if (now < next_release) continue;
+        const double late_us = (now - next_release) / 1e3;
         next_release += period;
         if (next_release + 100 * period < now) next_release = now + period;
 
         const bool was = view.stopped;
         std::uint32_t cycle = 0;
         Point proposal{};
+        if (stress.expire(now)) notify("info", "CPU stress OFF (60 s limit)");
+        const std::uint64_t t0 = now_ns();
         if (!view.stopped && ctl.make_request(now, cycle, proposal)) {
             last_cycle = cycle;
             if (!monitor.move(cycle, proposal, view)) break;
@@ -270,6 +295,7 @@ int main(int argc, char** argv) {
         } else if (!monitor.simple(kStatusQuery, view)) {
             break;
         }
+        const double decide_us = (now_ns() - t0) / 1e3;
         check_stop(was, now);
 
         Telemetry t;
@@ -286,6 +312,13 @@ int main(int argc, char** argv) {
         t.stops = stops;
         t.silence_ms = last_silence_ms;
         t.force = view.force;
+        t.decide_us = decide_us;
+        t.late_us = late_us;
+        t.stress = stress.running();
+        t.stress_threads = stress.threads();
+        t.stress_low_prio = stress.low_priority();
+        t.stress_mops = stress.work_rate(now);
+        t.stress_left_s = stress.seconds_left(now);
         server.send_text(state_json(t));
     }
     name_close(coid);
