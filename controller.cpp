@@ -7,6 +7,10 @@
 //   ./controller --scenario reversal
 //   ./controller --list
 //   ./controller --profile qemu ...  # timing profile; must match the monitor
+//   ./controller --trace run.csv ... # per-cycle timing/position CSV
+//
+// At the end it prints one machine-readable line starting with "RESULT,"
+// (used by qnx/vm/scenarios_on_target.sh and tools/qnx_report.py).
 
 #include "protocol.hpp"
 #include "scenarios.hpp"
@@ -28,7 +32,7 @@ namespace {
 void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s [--normal | --scenario NAME | --list] [--seed S]\n"
-                 "          [--profile hardware|qemu]\n",
+                 "          [--profile hardware|qemu] [--trace FILE.csv]\n",
                  argv0);
 }
 
@@ -38,6 +42,7 @@ int main(int argc, char** argv) {
     const char* scenario_name = "freeze_long";
     std::uint64_t seed = 1;
     const TimingProfile* profile = &hardware_profile();
+    const char* trace_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--list") {
@@ -51,6 +56,8 @@ int main(int argc, char** argv) {
             scenario_name = argv[++i];
         } else if (a == "--seed" && i + 1 < argc) {
             seed = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--trace" && i + 1 < argc) {
+            trace_path = argv[++i];
         } else if (a == "--profile" && i + 1 < argc) {
             profile = find_timing_profile(argv[++i]);
             if (!profile) {
@@ -81,8 +88,22 @@ int main(int argc, char** argv) {
                 profile->deadline_ns / 1e6);
     std::fflush(stdout);
 
+    std::FILE* trace = nullptr;
+    if (trace_path) {
+        trace = std::fopen(trace_path, "w");
+        if (!trace) {
+            std::perror(trace_path);
+            name_close(connection);
+    if (trace) std::fclose(trace);
+            return 1;
+        }
+        std::fprintf(trace, "step,cycle,t_ms,late_ms,rtt_ms,x,y,permitted,"
+                            "reason\n");
+    }
+
     ScenarioStream stream(*info, default_envelope(*profile), *profile, seed);
     auto next_release = Clock::now();
+    const auto start = next_release;
     int exit_code = 0;
     ScenarioStep step{};
     std::uint32_t steps_sent = 0;
@@ -119,6 +140,14 @@ int main(int argc, char** argv) {
                                   Clock::now() - woke)
                                   .count();
         if (rtt_ms > max_rtt_ms) max_rtt_ms = rtt_ms;
+        if (trace) {
+            std::fprintf(trace, "%u,%u,%.3f,%.3f,%.3f,%.5f,%.5f,%d,%d\n",
+                         steps_sent, step.cycle,
+                         std::chrono::duration<double, std::milli>(woke - start)
+                             .count(),
+                         late_ms, rtt_ms, reply.x, reply.y, reply.permitted,
+                         reply.reason);
+        }
         ++steps_sent;
         if (!reply.permitted) {
             stop_reason = static_cast<StopReason>(reply.reason);
@@ -137,6 +166,7 @@ int main(int argc, char** argv) {
         }
     }
     name_close(connection);
+    if (trace) std::fclose(trace);
 
     if (steps_sent > 0) {
         std::printf("TIMING steps=%u wake_late_ms(avg=%.3f max=%.3f) "
@@ -169,5 +199,18 @@ int main(int argc, char** argv) {
         if (stopped) std::printf(" at step %u", stop_step);
         std::printf("\n");
     }
+    // Machine-readable summary:
+    // RESULT,scenario,profile,expected,got,stop_step,steps,avg_late_ms,
+    // max_late_ms,late_over_2ms,max_rtt_ms
+    std::printf("RESULT,%s,%s,%s,%s,%d,%u,%.3f,%.3f,%u,%.3f\n", info->name,
+                profile->name,
+                !info->expect_stop ? "no stop"
+                : info->expected == StopReason::None
+                    ? "any stop"
+                    : to_string(info->expected),
+                stopped ? to_string(stop_reason) : "no stop",
+                stopped ? static_cast<int>(stop_step) : -1, steps_sent,
+                steps_sent ? sum_late_ms / steps_sent : 0.0, max_late_ms,
+                late_over_2ms, max_rtt_ms);
     return exit_code;
 }

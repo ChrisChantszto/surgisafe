@@ -30,7 +30,13 @@ function connect() {
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === 'envelope') env = msg;
+    if (msg.type === 'envelope') {
+      env = msg;
+      const el = $('conn');
+      el.textContent = msg.source === 'qnx'
+        ? 'Connected · decisions by QNX 8.0 safety monitor'
+        : 'Connected · Mac simulator';
+    }
     else if (msg.type === 'state') onState(msg);
     else if (msg.type === 'event') log(msg.level, msg.text);
   };
@@ -85,6 +91,20 @@ function onState(s) {
   const speed = env && !s.stopped ? Math.hypot(s.vx, s.vy) / env.max_step : 0;
   $('s-speed').textContent = `${Math.round(speed * 100)}%`;
   $('s-controller').textContent = s.controller;
+  updateForce(s);
+}
+
+let forceSeen = false;
+function updateForce(s) {
+  if (!env || !env.max_force) return;
+  const f = s.force || 0;
+  if (f > 0) forceSeen = true;
+  const span = env.max_force * 2;  // Bar shows 0 to twice the limit.
+  $('force-val').textContent = `${f.toFixed(1)} N / limit ${env.max_force.toFixed(1)} N`;
+  $('force-fill').style.width = `${Math.min(100, (f / span) * 100)}%`;
+  $('force-fill').style.background = f > env.max_force ? '#e5534b' : f > 0.6 * env.max_force ? '#f0a33a' : '#2fb38a';
+  $('force-limit').style.left = '50%';
+  if (forceSeen) $('force-note').textContent = 'Measured at the instrument tip by the MuJoCo physics simulation';
 }
 
 function setStatus(kind, label, detail) {
@@ -143,6 +163,24 @@ function draw() {
   ctx.strokeStyle = '#4b5a65';
   ctx.lineWidth = 2;
   ctx.strokeRect(tl.x, tl.y, canvas.width - 2 * PAD, canvas.height - 2 * PAD);
+
+  // Tissue mound in the MuJoCo scene (sim/mujoco/scene.py TISSUE). It is
+  // not part of the envelope: touching it is allowed, pushing too hard
+  // is not (contact-force limit).
+  {
+    const c = toPx({ x: 2.5, y: 5.5 });
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 0.9 * scale(), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(232, 140, 153, 0.22)';
+    ctx.fill();
+    ctx.strokeStyle = '#e88c99';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = '#e88c99';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('tissue', c.x, c.y + 4);
+  }
 
   // No-go zones.
   for (const z of env.zones) {

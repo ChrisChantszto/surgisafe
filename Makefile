@@ -2,6 +2,8 @@
 #   make test      build and run the safety-core unit tests with ASan/UBSan
 #   make campaign  run every fault scenario against the core (simulated time)
 #   make demo      run the dashboard simulator, then open http://localhost:8080
+#   make mujoco    3D robot arm (MuJoCo) driven by the simulator; run beside
+#                  `make demo` (first time: make mujoco-setup)
 #
 # QNX targets (run inside a QNX SDP 8.0 environment):
 #   make qnx       cross-compile controller and safety_monitor
@@ -49,6 +51,18 @@ sim: $(BUILD)/sim_server
 demo: $(BUILD)/sim_server
 	./$(BUILD)/sim_server --port $(PORT) --dir dashboard
 
+# ---- MuJoCo robot-arm simulation (Python) ---------------------------------
+MUJOCO_VENV := .venv-mujoco
+.PHONY: mujoco-setup mujoco mujoco-headless
+mujoco-setup:
+	python3 -m venv $(MUJOCO_VENV)
+	$(MUJOCO_VENV)/bin/pip install -r sim/mujoco/requirements.txt
+# mjpython is required on macOS for MuJoCo's interactive viewer.
+mujoco:
+	$(MUJOCO_VENV)/bin/mjpython sim/mujoco/bridge.py --url ws://127.0.0.1:$(PORT)/ws
+mujoco-headless:
+	$(MUJOCO_VENV)/bin/python sim/mujoco/bridge.py --url ws://127.0.0.1:$(PORT)/ws --headless
+
 .PHONY: test
 test: $(BUILD)/safety_core_test
 	./$(BUILD)/safety_core_test
@@ -79,8 +93,14 @@ $(BUILD)/qnx/safety_core_test: $(TEST_SRC) $(TEST_HDR) $(CORE_SRC) $(CORE_HDR) $
 	@mkdir -p $(BUILD)/qnx
 	$(QCC) $(QNX_CXXFLAGS) $(TEST_SRC) $(CORE_SRC) $(LIVE_SRC) net/sha1.cpp -o $@
 
+# Network gateway: serves the dashboard and forwards to safety_monitor.
+# QNX keeps socket functions in libsocket.
+$(BUILD)/qnx/qnx_gateway: qnx_gateway.cpp $(LIVE_SRC) $(LIVE_HDR) $(NET_SRC) $(NET_HDR) net/json_util.hpp $(CORE_SRC) $(CORE_HDR) protocol.hpp
+	@mkdir -p $(BUILD)/qnx
+	$(QCC) $(QNX_CXXFLAGS) qnx_gateway.cpp $(LIVE_SRC) $(NET_SRC) $(CORE_SRC) -lsocket -o $@
+
 .PHONY: qnx
-qnx: $(BUILD)/qnx/safety_monitor $(BUILD)/qnx/controller $(BUILD)/qnx/safety_core_test
+qnx: $(BUILD)/qnx/safety_monitor $(BUILD)/qnx/controller $(BUILD)/qnx/safety_core_test $(BUILD)/qnx/qnx_gateway
 
 # ---- QNX workflow, run from the Mac ---------------------------------------
 # Needs the qnx-build container (qnx/docker/setup.sh) with the SDP in
@@ -90,7 +110,7 @@ REPO_IN_CONTAINER := /home/$(shell id -un)$(subst $(HOME),,$(CURDIR))
 REPEATS ?= 3
 PROFILE ?= qemu
 
-.PHONY: qnx-build qnx-image qnx-boot qnx-deploy qnx-test qnx-scenarios
+.PHONY: qnx-build qnx-image qnx-boot qnx-deploy qnx-test qnx-scenarios qnx-report qnx-live
 qnx-build:
 	docker exec qnx-build bash -c 'source ~/qnx800/qnxsdp-env.sh > /dev/null && cd "$(REPO_IN_CONTAINER)" && make qnx QNX_VARIANT=$(QNX_TARGET_VARIANT)'
 qnx-image:
@@ -103,6 +123,17 @@ qnx-test: qnx-deploy
 	qnx/vm/target.sh ssh /data/surgisafe/safety_core_test
 qnx-scenarios: qnx-deploy
 	qnx/vm/target.sh ssh /data/surgisafe/scenarios_on_target.sh $(REPEATS) $(PROFILE)
+
+# Live demo with QNX in charge: safety_monitor + gateway on QNX. Then open
+# http://localhost:8088 and run `make mujoco PORT=8088` in another terminal.
+qnx-live: qnx-deploy
+	qnx/vm/target.sh ssh -t 'cd /data/surgisafe && (on -p 60 ./safety_monitor --profile $(PROFILE) &) && sleep 1 && on -p 50 ./qnx_gateway --profile $(PROFILE) --dir dashboard; slay -f safety_monitor'
+
+# Fetch the last qnx-scenarios results and build build/qnx-report.html.
+qnx-report:
+	qnx/vm/target.sh fetch
+	python3 tools/qnx_report.py
+	@echo "Open it with: open build/qnx-report.html"
 
 .PHONY: clean
 clean:

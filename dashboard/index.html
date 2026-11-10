@@ -26,6 +26,7 @@
       <span><i class="cross"></i>Planner target</span>
       <span><i class="dot zone"></i>No-go zone</span>
       <span><i class="line trail"></i>Path</span>
+      <span><i class="dot tissue"></i>Tissue (MuJoCo physics)</span>
     </div>
   </section>
 
@@ -33,6 +34,11 @@
     <div id="status" class="card status status-off">
       <div class="status-label" id="status-label">Waiting for simulator</div>
       <div class="status-detail" id="status-detail">Start it with <code>make demo</code></div>
+      <div class="force">
+        <div class="force-head"><span>Contact force</span><span id="force-val">0.0 N</span></div>
+        <div class="force-bar"><div id="force-fill"></div><div id="force-limit"></div></div>
+        <div class="force-note" id="force-note">Start the MuJoCo arm (make mujoco) to measure force</div>
+      </div>
       <button id="reset" class="primary" disabled>Operator reset</button>
     </div>
 

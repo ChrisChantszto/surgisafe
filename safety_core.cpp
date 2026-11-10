@@ -54,6 +54,7 @@ const char* to_string(StopReason reason) {
     case StopReason::SpeedLimit: return "speed limit";
     case StopReason::AccelLimit: return "acceleration limit";
     case StopReason::NoGoZone: return "no-go zone";
+    case StopReason::ContactForce: return "contact force";
     }
     return "unknown";
 }
@@ -157,6 +158,14 @@ void SafetyCore::on_tick(std::uint64_t now_ns) {
 
 void SafetyCore::on_fault() {
     latch(StopReason::MonitorFault);
+}
+
+void SafetyCore::on_force(double newtons) {
+    last_force_ = newtons;
+    if (!std::isfinite(newtons) || newtons < 0.0 ||
+        newtons > env_.max_contact_force_n) {
+        latch(StopReason::ContactForce);
+    }
 }
 
 } // namespace surgisafe

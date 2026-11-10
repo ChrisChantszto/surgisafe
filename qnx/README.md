@@ -50,7 +50,35 @@ Tested with: QNX SDP 8.0 (GCC 12.2, `gcc_ntoaarch64le`), QNX Software Center
 | `make qnx-build` | Cross-compile monitor, controller and unit tests for aarch64le |
 | `make qnx-test` | Build, copy to QNX, run the 55 unit/property tests **on QNX** |
 | `make qnx-scenarios REPEATS=8` | Run every fault scenario through the real QNX processes (`PROFILE=qemu` by default) |
+| `make qnx-report` | Fetch the last results and build `build/qnx-report.html`: outcome matrix, heartbeat-gap chart, tip path and wake-up lateness histogram (self-contained, opens offline) |
+| `make qnx-live` | **QNX in charge of the live demo**: starts `safety_monitor` and `qnx_gateway` on QNX. Then open http://localhost:8088 (dashboard served by QNX) and run `make mujoco PORT=8088` for the 3D arm |
 | `qnx/vm/target.sh ssh` | Shell on the QNX target (`/data/surgisafe` holds the programs) |
+
+## Live demo with QNX in charge
+
+```
+Mac: browser dashboard ─┐                    ┌─ QNX 8.0 (QEMU) ───────────────────┐
+     (mouse/camera/AI)  ├─ WebSocket :8088 ──┤ qnx_gateway ──MsgSend──► safety_monitor
+Mac: MuJoCo arm ────────┘   (port forward)   │ (10 ms loop)             (decides; timer-
+     (physics, force)                        │                           pulse watchdog)
+                                             └────────────────────────────────────┘
+```
+
+`qnx_gateway.cpp` serves the dashboard and speaks the same JSON protocol as
+the Mac simulator, but makes no safety decisions: every 10 ms it sends the
+next proposed step to `safety_monitor` with `MsgSend`; MuJoCo's force
+readings go to the monitor as `ForceReport` messages; operator reset is a
+`ResetRequest`; when it is not sending moves it asks for the monitor's status,
+so it is the monitor's own QNX timer pulse that detects a silent controller.
+Dashboard header: "decisions by QNX 8.0 safety monitor".
+
+Verified end to end (`qemu` profile): 60 s of continuous motion with the
+MuJoCo arm and no false stops; then, all decided by the QNX monitor:
+contact force (stopped at 16.4 N), gateway crash (watchdog, seen ~60 ms after
+the last approved move), rogue commands (acceleration limit), aiming at the
+no-go zone (no-go zone), and operator resets. The contact-force overshoot is
+larger than on the Mac simulator (10.3 N) because the force reading and the
+stop each cross the Mac-QNX network hop.
 
 ## Workarounds we needed (QNX 8.0 + QEMU 11 + macOS)
 

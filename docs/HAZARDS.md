@@ -22,6 +22,7 @@ cycle. All limits live in one `Envelope` struct ([safety_core.hpp](../safety_cor
 | H-6 | The supervisor cannot enforce its checks | Timer creation or arming fails, bad configuration |
 | H-7 | Violent jerk or sudden reversal | Planner switching targets abruptly, noisy tracking input |
 | H-8 | Instrument enters or cuts across a critical structure | Planner ignores anatomy, tracking error, deliberate bad command |
+| H-9 | Instrument presses too hard on tissue | Planner steers into tissue, tracking error, faulty or disconnected force sensor |
 
 ## Safety requirements
 
@@ -36,6 +37,7 @@ cycle. All limits live in one `Envelope` struct ([safety_core.hpp](../safety_cor
 | SR-7 | Only the monitor changes the instrument position; the controller only proposes | H-1–H-8 | Architecture: position lives only in `SafetyCore` |
 | SR-8 | A move is committed only if the step differs from the previous step by ≤ `max_step_change` (0.02) | H-7 | `SafetyCore::check` |
 | SR-9 | A move is committed only if the straight path from the current position to the target does not enter any no-go zone | H-8 | `segment_hits_zone`, `SafetyCore::check` |
+| SR-10 | If the measured contact force exceeds `max_contact_force_n` (5 N), or the reading is not a valid number, the monitor latches a safe stop; the arm then holds where the tip physically is and retracts the instrument | H-9 | `SafetyCore::on_force`; force from the MuJoCo simulation (`sim/mujoco/bridge.py`) |
 
 When several rules are broken at once, the reported reason follows this
 priority: deadline (SR-5), workspace (SR-2), no-go zone (SR-9), speed
@@ -54,6 +56,7 @@ priority: deadline (SR-5), workspace (SR-2), no-go zone (SR-9), speed
 | SR-7 | All of the above | All of the above | All of the above | Inspection |
 | SR-8 | `sr8_*` | every accepted move obeys the acceleration limit | `reversal` | `./controller --scenario reversal` |
 | SR-9 | `sr9_*` (incl. a path that clips a zone between two legal endpoints) | no accepted path enters a zone | `nogo_intrusion` | same scenario |
+| SR-10 | `sr10_*` (limit, over limit, NaN/negative/infinite readings) | — | — | MuJoCo arm pushed into tissue: stop at the tissue edge, measured peak 10.3 N (see note) |
 | All | — | — | `rogue_ai`: random and hostile commands every cycle; 0 envelope breaches required | same scenario |
 
 Each test name starts with the requirement it verifies. The test suite was
@@ -67,6 +70,13 @@ The campaign runs in **simulated time** on the host: it proves the logic
 reacts correctly to each fault, not real-time performance. Timing evidence
 must come from runs on QNX.
 
+**SR-10 note (honest finding):** at full speed (about 0.45 m/s in the
+simulated arm) the instrument hits the tissue hard enough that force passes
+the 5 N limit within a few milliseconds; with force reported as a 100 Hz
+peak value the stop latched at a measured 10.3 N. Limiting force reliably
+needs the approach speed limited near tissue as well, which a real system
+would add (e.g. a lower speed limit inside a margin around soft tissue).
+
 ## Out of scope (known limitations)
 
 - No physical actuator, motor driver, or independent hardware safety circuit.
@@ -74,3 +84,6 @@ must come from runs on QNX.
 - The controller is not authenticated; any local process can open the service.
 - Scheduling priorities and CPU partitioning are not yet configured.
 - No-go zones are static circles; real systems track moving anatomy.
+- The force sensor reading reaches the simulator over the same WebSocket as
+  the planner's targets; on a real system the sensor would be wired to the
+  monitor directly, and a stale-sensor timeout would be needed.

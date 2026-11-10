@@ -18,6 +18,8 @@ Two native QNX processes communicate via `name_attach`/`name_open` and
 - `live_controller.hpp/.cpp`: the interactive controller: a 10 ms loop toward the latest target, holding still when the target goes stale, plus demo faults (freeze, crash, rogue commands).
 - `dashboard/`: browser dashboard (the untrusted planner side): mouse, webcam hand tracking, AI autopilot.
 - `sim/sim_server.cpp` and `net/`: host simulator serving the dashboard over HTTP and a WebSocket, running the real safety core.
+- `qnx_gateway.cpp`: the same dashboard protocol on QNX, forwarding every move, force reading and reset to `safety_monitor` with `MsgSend` (`make qnx-live`).
+- `sim/mujoco/`: MuJoCo robot arm (physics + contact force) that follows the approved positions.
 - `protocol.hpp`: QNX IPC message structures.
 - `tests/`: host unit tests and randomized property tests for the safety core.
 - `docs/HAZARDS.md`: hazards, safety requirements (SR-1…SR-9) and how each is verified.
@@ -50,6 +52,20 @@ Then open http://localhost:8080 in Chrome or Safari. The simulator runs the real
 - **Two different "silences":** if the planner stops sending targets (mouse leaves the workspace, hand out of view), the controller brakes and **holds** — a safe pause, not a fault. If the controller itself stops sending heartbeats, the monitor's watchdog latches a **SAFE STOP**.
 
 The simulator listens on 127.0.0.1 only. Its timing is best-effort on macOS/Linux (the watchdog is checked about every millisecond), so it demonstrates behaviour, not real-time guarantees. On QNX, the same network code is intended to become a gateway process that forwards requests to `safety_monitor` with `MsgSend`.
+
+## Robot arm in MuJoCo (no QNX needed)
+
+A physics-simulated SCARA-style instrument arm follows every position the safety monitor approves, and reports the **contact force** between the instrument tip and a soft tissue mound back to the monitor, which enforces a 5 N limit (rule SR-10).
+
+```sh
+make mujoco-setup        # once: Python venv with MuJoCo
+make demo                # terminal 1: simulator + dashboard (http://localhost:8080)
+make mujoco              # terminal 2: 3D arm (MuJoCo viewer, via mjpython)
+```
+
+To put **real QNX** in charge instead of the Mac simulator, boot the QNX VM and run `make qnx-live`, open http://localhost:8088, and start the arm with `make mujoco PORT=8088` (see [qnx/README.md](qnx/README.md)).
+
+Steer from the dashboard (mouse, camera hand tracking, or autopilot). Push the instrument into the pink tissue and the monitor stops on contact force; the arm holds where the tip physically is and retracts the instrument. Every other stop also retracts and holds. The simulator asks macOS for real-time thread scheduling (Mach time-constraint policy) so the 15 ms watchdog is not tripped by timer coalescing.
 
 ## Fault-injection campaign (no QNX needed)
 
@@ -111,6 +127,7 @@ When the controller finishes or exits, it stops sending heartbeats, so the monit
 | 5 | Speed limit (step longer than 0.1 per cycle) |
 | 6 | Acceleration limit (step changed by more than 0.02 per cycle) |
 | 7 | No-go zone (path enters or crosses a no-go zone) |
+| 8 | Contact force (force sensor above 5 N, or an invalid reading) |
 
 The safe stop is latched: every later reply reports the reason that caused the **first** stop.
 

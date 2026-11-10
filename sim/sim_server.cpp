@@ -12,6 +12,7 @@
 // Timing in this simulator is macOS/Linux best-effort, not real-time.
 
 #include "live_controller.hpp"
+#include "net/json_util.hpp"
 #include "net/ws_server.hpp"
 #include "safety_core.hpp"
 
@@ -23,12 +24,45 @@
 #include <memory>
 #include <string>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#endif
+
 using namespace surgisafe;
+using namespace surgisafe::net;
 
 namespace {
 
 constexpr std::uint64_t kPeriodNs = 10ULL * 1000 * 1000;
 volatile std::sig_atomic_t g_running = 1;
+
+// macOS coalesces timers of ordinary processes to save power, which can
+// delay a wake-up by several milliseconds and trip the 15 ms watchdog.
+// Ask for Mach "time-constraint" (real-time) scheduling for the loop thread,
+// as audio software does. No privileges needed. Linux: no-op here.
+bool request_realtime_scheduling() {
+#ifdef __APPLE__
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    const auto abs = [&](double ms) {
+        return static_cast<std::uint32_t>(ms * 1e6 * tb.denom / tb.numer);
+    };
+    thread_time_constraint_policy_data_t policy;
+    policy.period = abs(1.0);        // The loop runs about every 1 ms...
+    policy.computation = abs(0.3);   // ...needing up to 0.3 ms of CPU...
+    policy.constraint = abs(1.0);    // ...within each 1 ms window.
+    policy.preemptible = 1;
+    return thread_policy_set(mach_thread_self(),
+                             THREAD_TIME_CONSTRAINT_POLICY,
+                             reinterpret_cast<thread_policy_t>(&policy),
+                             THREAD_TIME_CONSTRAINT_POLICY_COUNT) ==
+           KERN_SUCCESS;
+#else
+    return false;
+#endif
+}
 
 void on_signal(int) { g_running = 0; }
 
@@ -37,79 +71,6 @@ std::uint64_t now_ns() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
-}
-
-// Minimal extraction from the flat JSON objects the dashboard sends.
-// Untrusted input: anything unexpected is simply ignored.
-bool json_string(const std::string& s, const char* key, std::string& out) {
-    const std::string k = std::string("\"") + key + "\"";
-    auto p = s.find(k);
-    if (p == std::string::npos) return false;
-    p = s.find(':', p + k.size());
-    if (p == std::string::npos) return false;
-    p = s.find('"', p);
-    if (p == std::string::npos) return false;
-    const auto e = s.find('"', p + 1);
-    if (e == std::string::npos || e - p - 1 > 32) return false;
-    out = s.substr(p + 1, e - p - 1);
-    return true;
-}
-
-bool json_number(const std::string& s, const char* key, double& out) {
-    const std::string k = std::string("\"") + key + "\"";
-    auto p = s.find(k);
-    if (p == std::string::npos) return false;
-    p = s.find(':', p + k.size());
-    if (p == std::string::npos) return false;
-    const char* begin = s.c_str() + p + 1;
-    char* end = nullptr;
-    out = std::strtod(begin, &end);
-    return end != begin;
-}
-
-bool json_bool(const std::string& s, const char* key, bool& out) {
-    const std::string k = std::string("\"") + key + "\"";
-    auto p = s.find(k);
-    if (p == std::string::npos) return false;
-    p = s.find(':', p + k.size());
-    if (p == std::string::npos) return false;
-    p = s.find_first_not_of(" \t", p + 1);
-    if (p == std::string::npos) return false;
-    if (s.compare(p, 4, "true") == 0) out = true;
-    else if (s.compare(p, 5, "false") == 0) out = false;
-    else return false;
-    return true;
-}
-
-std::string envelope_json(const Envelope& env) {
-    std::string zones;
-    for (std::size_t i = 0; i < env.zone_count; ++i) {
-        char z[96];
-        std::snprintf(z, sizeof z, "%s{\"x\":%.4f,\"y\":%.4f,\"r\":%.4f}",
-                      i ? "," : "", env.zones[i].center.x,
-                      env.zones[i].center.y, env.zones[i].radius);
-        zones += z;
-    }
-    char buf[512];
-    std::snprintf(buf, sizeof buf,
-                  "{\"type\":\"envelope\",\"min_x\":%.4f,\"max_x\":%.4f,"
-                  "\"min_y\":%.4f,\"max_y\":%.4f,\"max_step\":%.4f,"
-                  "\"max_step_change\":%.4f,\"timeout_ms\":%.3f,"
-                  "\"period_ms\":%.3f,\"zones\":[",
-                  env.min_x, env.max_x, env.min_y, env.max_y, env.max_step,
-                  env.max_step_change, env.watchdog_timeout_ns / 1e6,
-                  kPeriodNs / 1e6);
-    return std::string(buf) + zones + "]}";
-}
-
-std::string event_json(const char* level, const std::string& text) {
-    std::string escaped;
-    for (char ch : text) {
-        if (ch == '"' || ch == '\\') escaped.push_back('\\');
-        escaped.push_back(ch);
-    }
-    return std::string("{\"type\":\"event\",\"level\":\"") + level +
-           "\",\"text\":\"" + escaped + "\"}";
 }
 
 struct Sim {
@@ -161,10 +122,13 @@ int main(int argc, char** argv) {
                        static_dir)) {
         return 1;
     }
-    std::printf("SurgiSafe-RT simulator: open http://localhost:%d\n", port);
+    const bool rt = request_realtime_scheduling();
+    std::printf("SurgiSafe-RT simulator: open http://localhost:%d%s\n", port,
+                rt ? " (real-time thread scheduling on)" : "");
     std::fflush(stdout);
 
     Sim sim;
+    std::uint32_t last_cycle = 0;  // Last cycle sent; used in stop reports.
     auto notify = [&](const char* level, const std::string& text) {
         std::printf("[%s] %s\n", level, text.c_str());
         std::fflush(stdout);
@@ -180,6 +144,11 @@ int main(int argc, char** argv) {
                           "SAFE_STOP: watchdog timeout, %.2f ms after the "
                           "last heartbeat",
                           sim.last_silence_ms);
+        } else if (sim.core->stop_reason() == StopReason::ContactForce) {
+            std::snprintf(text, sizeof text,
+                          "SAFE_STOP: contact force %.2f N (limit %.1f N)",
+                          sim.core->last_force(),
+                          sim.env.max_contact_force_n);
         } else {
             std::snprintf(text, sizeof text, "SAFE_STOP: %s (cycle %u)",
                           to_string(sim.core->stop_reason()), cycle);
@@ -188,8 +157,8 @@ int main(int argc, char** argv) {
     };
 
     server.on_open = [&] {
-        server.send_text(envelope_json(sim.env));
-        notify("info", "Dashboard connected to simulator");
+        server.send_text(envelope_json(sim.env, kPeriodNs, "mac-sim"));
+        notify("info", "Client connected to simulator");
     };
     server.on_message = [&](const std::string& msg) {
         std::string cmd;
@@ -217,6 +186,18 @@ int main(int argc, char** argv) {
         } else if (cmd == "kill") {
             sim.ctl->kill();
             notify("fault", "Injected controller crash");
+        } else if (cmd == "force") {
+            // Contact-force sensor reading from the physics simulation
+            // (MuJoCo bridge). On a real system the sensor would be wired to
+            // the monitor directly, not through the planner's channel.
+            double n = 0;
+            if (json_number(msg, "n", n)) {
+                const bool was_stopped = sim.core->stopped();
+                sim.core->on_force(n);
+                if (!was_stopped && sim.core->stopped()) {
+                    report_stop(now, last_cycle);
+                }
+            }
         } else if (cmd == "rogue") {
             bool on = true;
             json_bool(msg, "on", on);
@@ -227,7 +208,6 @@ int main(int argc, char** argv) {
     };
 
     std::uint64_t next_release = now_ns() + kPeriodNs;
-    std::uint32_t last_cycle = 0;
     while (g_running) {
         std::uint64_t now = now_ns();
         const int wait_ms = next_release > now ? 1 : 0;
@@ -263,27 +243,21 @@ int main(int argc, char** argv) {
             }
         }
 
-        const Point p = sim.core->position();
-        const Point t = sim.ctl->target();
-        char state[512];
-        std::snprintf(
-            state, sizeof state,
-            "{\"type\":\"state\",\"cycle\":%u,\"x\":%.5f,\"y\":%.5f,"
-            "\"vx\":%.5f,\"vy\":%.5f,\"tx\":%.5f,\"ty\":%.5f,"
-            "\"has_target\":%s,\"stopped\":%s,\"reason\":\"%s\",\"code\":%d,"
-            "\"holding\":%s,\"controller\":\"%s\",\"accepted\":%llu,"
-            "\"stops\":%llu,\"silence_ms\":%.3f}",
-            last_cycle, p.x, p.y, sim.core->velocity().x,
-            sim.core->velocity().y, t.x, t.y,
-            sim.ctl->has_target() ? "true" : "false",
-            sim.core->stopped() ? "true" : "false",
-            to_string(sim.core->stop_reason()),
-            static_cast<int>(sim.core->stop_reason()),
-            sim.ctl->holding() ? "true" : "false",
-            to_string(sim.ctl->mode()),
-            static_cast<unsigned long long>(sim.accepted),
-            static_cast<unsigned long long>(sim.stops), sim.last_silence_ms);
-        server.send_text(state);
+        Telemetry t;
+        t.cycle = last_cycle;
+        t.position = sim.core->position();
+        t.velocity = sim.core->velocity();
+        t.target = sim.ctl->target();
+        t.has_target = sim.ctl->has_target();
+        t.stopped = sim.core->stopped();
+        t.holding = sim.ctl->holding();
+        t.reason = sim.core->stop_reason();
+        t.controller = sim.ctl->mode();
+        t.accepted = sim.accepted;
+        t.stops = sim.stops;
+        t.silence_ms = sim.last_silence_ms;
+        t.force = sim.core->last_force();
+        server.send_text(state_json(t));
     }
     std::printf("Simulator stopped\n");
     return 0;

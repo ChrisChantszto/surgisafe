@@ -18,6 +18,20 @@ MON_PRIO=60
 CTL_PRIO=50
 cd "$(dirname "$0")" || exit 99
 
+# Machine-readable results for tools/qnx_report.py: one summary row per run
+# and one per-cycle trace CSV per run.
+RESULTS=results
+rm -rf "$RESULTS"
+mkdir -p "$RESULTS"
+{
+    echo "profile=$PROFILE"
+    echo "repeats=$REPEATS"
+    echo "uname=$(uname -a)"
+    echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$RESULTS/meta.txt"
+echo "run,ok,monitor_watchdog,scenario,profile,expected,got,stop_step,steps,avg_late_ms,max_late_ms,late_over_2ms,max_rtt_ms" \
+    > "$RESULTS/summary.csv"
+
 total_fail=0
 for s in $(./controller --list | awk '{print $1}'); do
     pass=0
@@ -29,7 +43,7 @@ for s in $(./controller --list | awk '{print $1}'); do
         mon=$!
         sleep 1
         on -p $CTL_PRIO ./controller --scenario "$s" --seed "$i" \
-            --profile "$PROFILE" > ctl.log 2>&1
+            --profile "$PROFILE" --trace "$RESULTS/${s}_$i.csv" > ctl.log 2>&1
         sleep 0.1
         kill $mon 2> /dev/null
         wait $mon 2> /dev/null
@@ -40,6 +54,9 @@ for s in $(./controller --list | awk '{print $1}'); do
         else
             grep -q "AS EXPECTED" ctl.log && ok=1 || ok=0
         fi
+        grep -q "WATCHDOG TIMEOUT" mon.log && monwd=1 || monwd=0
+        echo "$i,$ok,$monwd,$(grep -h '^RESULT,' ctl.log | cut -d, -f2-)" \
+            >> "$RESULTS/summary.csv"
         if [ $ok = 1 ]; then
             pass=$((pass + 1))
         else

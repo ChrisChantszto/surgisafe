@@ -211,14 +211,6 @@ void WsServer::handle_http(Conn& c) {
             flush(c);
             return;
         }
-        // Only one dashboard at a time: the newest wins.
-        for (Conn& other : conns_) {
-            if (&other != &c && other.websocket) {
-                other.out += frame(0x8, "");
-                other.close_after_flush = true;
-                flush(other);
-            }
-        }
         c.out += "HTTP/1.1 101 Switching Protocols\r\n"
                  "Upgrade: websocket\r\nConnection: Upgrade\r\n"
                  "Sec-WebSocket-Accept: " +
@@ -326,13 +318,16 @@ std::string WsServer::frame(std::uint8_t opcode, const std::string& payload) {
 }
 
 bool WsServer::send_text(const std::string& message) {
-    const int i = ws_index();
-    if (i < 0) return false;
-    Conn& c = conns_[static_cast<std::size_t>(i)];
-    if (c.out.size() > kMaxOutBuffer) return false;  // Slow client: drop.
-    c.out += frame(0x1, message);
-    flush(c);
-    return true;
+    const std::string f = frame(0x1, message);
+    bool any = false;
+    for (Conn& c : conns_) {
+        if (c.fd == -1 || !c.websocket || c.close_after_flush) continue;
+        any = true;
+        if (c.out.size() > kMaxOutBuffer) continue;  // Slow client: drop.
+        c.out += f;
+        flush(c);
+    }
+    return any;
 }
 
 void WsServer::flush(Conn& c) {

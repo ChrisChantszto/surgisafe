@@ -1,8 +1,9 @@
 #pragma once
 
 // A deliberately small HTTP + WebSocket server (POSIX sockets + poll), used
-// to serve the dashboard and exchange JSON messages with it. One dashboard
-// client at a time; a new connection replaces the old one.
+// to serve the dashboard and exchange JSON messages with it. Several
+// WebSocket clients may be connected (e.g. the browser dashboard and the
+// MuJoCo bridge); messages are broadcast to all of them.
 //
 // Everything it receives is untrusted input: requests and frames are size-
 // limited, file paths are confined to the static directory, and malformed
@@ -33,8 +34,9 @@ public:
     // Handles network activity for up to `timeout_ms` milliseconds.
     void poll(int timeout_ms);
 
-    // Queues a text message to the WebSocket client, if any. Returns false
-    // if there is no client or its send buffer is full (message dropped).
+    // Queues a text message to every WebSocket client. A client whose send
+    // buffer is full misses this message (telemetry is droppable). Returns
+    // false if there is no client.
     bool send_text(const std::string& message);
 
     bool has_client() const { return ws_index() >= 0; }

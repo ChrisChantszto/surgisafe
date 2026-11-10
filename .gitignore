@@ -10,3 +10,5 @@
 
 # Local editor/agent settings
 .claude/
+__pycache__/
+.venv-mujoco/

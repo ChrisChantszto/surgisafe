@@ -41,6 +41,8 @@ struct Envelope {
     double max_step = 0.1;          // Max distance per cycle (speed limit).
     double max_step_change = 0.02;  // Max change of step per cycle (accel).
     std::uint64_t watchdog_timeout_ns = 15ULL * 1000 * 1000;
+    // Max contact force the instrument may exert, from the force sensor.
+    double max_contact_force_n = 5.0;
     std::array<NoGoZone, kMaxZones> zones{};
     std::size_t zone_count = 0;
 };
@@ -82,6 +84,7 @@ enum class StopReason : std::int32_t {
     SpeedLimit = 5,       // Step longer than max_step.
     AccelLimit = 6,       // Step changed by more than max_step_change.
     NoGoZone = 7,         // Path enters or crosses a no-go zone.
+    ContactForce = 8,     // Force sensor above the limit (or invalid).
 };
 
 const char* to_string(StopReason reason);
@@ -128,6 +131,13 @@ public:
     // The monitor could not enforce its checks (e.g. failed to arm a timer).
     void on_fault();
 
+    // A reading from the instrument's contact-force sensor, in newtons.
+    // Latches ContactForce if it exceeds the limit or is not a valid number
+    // (a broken sensor must fail safe). Applies whether or not the
+    // controller has started: pressing too hard is unsafe at any time.
+    void on_force(double newtons);
+    double last_force() const { return last_force_; }
+
     bool armed() const { return armed_; }
     bool stopped() const { return reason_ != StopReason::None; }
     // True while the monitor should keep a watchdog timer armed.
@@ -154,6 +164,7 @@ private:
     std::uint32_t expected_cycle_ = 0;
     std::uint64_t deadline_ns_ = 0;
     bool armed_ = false;
+    double last_force_ = 0.0;
     StopReason reason_ = StopReason::None;
 };
 

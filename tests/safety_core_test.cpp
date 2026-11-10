@@ -391,6 +391,42 @@ TEST(sr9_zone_error_wins_over_speed) {
     expect_rejected(core, clock, 0, {4.0, 4.0}, StopReason::NoGoZone);
 }
 
+// --- SR-10: contact force limit --------------------------------------------
+
+TEST(sr10_force_within_limit_is_allowed) {
+    SafetyCore core;
+    FakeClock clock;
+    core.on_force(0.0);
+    core.on_force(core.envelope().max_contact_force_n);  // On the limit.
+    CHECK(!core.stopped());
+    CHECK(send(core, clock, 0, {0.01, 0.0}).permitted);
+}
+
+TEST(sr10_force_over_limit_latches) {
+    SafetyCore core;
+    FakeClock clock;
+    CHECK(send(core, clock, 0, {0.01, 0.0}).permitted);
+    core.on_force(core.envelope().max_contact_force_n + 0.01);
+    CHECK(core.stop_reason() == StopReason::ContactForce);
+    expect_rejected(core, clock, 1, {0.02, 0.0}, StopReason::ContactForce);
+}
+
+TEST(sr10_invalid_force_reading_fails_safe) {
+    const double bad[] = {kNaN, kInf, -1.0};
+    for (const double f : bad) {
+        SafetyCore core;
+        core.on_force(f);
+        CHECK(core.stop_reason() == StopReason::ContactForce);
+    }
+}
+
+TEST(sr10_force_does_not_overwrite_earlier_stop) {
+    SafetyCore core;
+    core.on_fault();
+    core.on_force(100.0);
+    CHECK(core.stop_reason() == StopReason::MonitorFault);
+}
+
 // --- Geometry helpers ------------------------------------------------------
 
 TEST(geometry_distance_to_segment) {
@@ -451,6 +487,7 @@ TEST(reason_names_and_wire_values) {
     CHECK(static_cast<int>(StopReason::SpeedLimit) == 5);
     CHECK(static_cast<int>(StopReason::AccelLimit) == 6);
     CHECK(static_cast<int>(StopReason::NoGoZone) == 7);
+    CHECK(static_cast<int>(StopReason::ContactForce) == 8);
     CHECK(std::string_view(to_string(StopReason::NoGoZone)) == "no-go zone");
     CHECK(std::string_view(to_string(static_cast<StopReason>(42))) ==
           "unknown");

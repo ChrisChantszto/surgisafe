@@ -24,7 +24,17 @@ union ReceiveBuffer {
     std::uint16_t type;
     struct _pulse pulse;
     MoveRequest request;
+    ForceReport force;
+    SimpleRequest simple;
 };
+
+MonitorStatus status_of(const SafetyCore& core) {
+    return MonitorStatus{core.stopped() ? 1 : 0,
+                         static_cast<std::int32_t>(core.stop_reason()),
+                         core.position().x, core.position().y,
+                         core.last_force(), core.expected_cycle(),
+                         core.armed() ? 1u : 0u};
+}
 
 std::uint64_t monotonic_now_ns() {
     timespec ts{};
@@ -155,6 +165,36 @@ int main(int argc, char** argv) {
         // or the client's name_open() fails.
         if (message.type == _IO_CONNECT) {
             MsgReply(rcvid, EOK, nullptr, 0);
+            continue;
+        }
+        // Gateway messages: force sensor, status, operator reset.
+        if (message.type == kForceReport || message.type == kStatusQuery ||
+            message.type == kResetRequest) {
+            const auto want = static_cast<decltype(info.srcmsglen)>(
+                message.type == kForceReport ? sizeof(ForceReport)
+                                             : sizeof(SimpleRequest));
+            if (info.srcmsglen != want) {
+                MsgError(rcvid, EBADMSG);
+                continue;
+            }
+            const bool was_stopped = core.stopped();
+            if (message.type == kForceReport) {
+                core.on_force(message.force.newtons);
+                if (!was_stopped && core.stopped()) {
+                    watchdog.disarm();
+                    std::printf("CONTACT FORCE %.2f N: SAFE_STOP\n",
+                                message.force.newtons);
+                }
+            } else if (message.type == kResetRequest && was_stopped) {
+                // Operator reset: a fresh core at the current position;
+                // the watchdog re-arms with the next accepted move.
+                core = SafetyCore(core.envelope(), core.position());
+                watchdog.disarm();
+                std::puts("OPERATOR RESET: motion re-enabled");
+            }
+            const MonitorStatus st = status_of(core);
+            MsgReply(rcvid, EOK, &st, sizeof(st));
+            std::fflush(stdout);
             continue;
         }
         if (message.type != kMoveRequest) {
