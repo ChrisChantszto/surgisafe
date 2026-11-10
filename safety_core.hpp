@@ -45,8 +45,29 @@ struct Envelope {
     std::size_t zone_count = 0;
 };
 
-// The envelope used by the demo: an 8 x 8 workspace with one no-go zone.
-Envelope default_envelope();
+// Timing assumptions for a target platform. The heartbeat deadline is part
+// of the safety envelope; the margin is how far timing tests keep their
+// gaps from the deadline (it must exceed the worst delivery latency the
+// platform shows, or tests flip from pass to fail by chance).
+struct TimingProfile {
+    const char* name;
+    const char* description;
+    std::uint64_t period_ns;            // Controller period.
+    std::uint64_t deadline_ns;          // Watchdog deadline.
+    std::uint64_t margin_ns;            // Test margin either side of deadline.
+    std::uint64_t expected_latency_ns;  // Delivery latency the host campaign
+                                        // models (must be < margin_ns).
+};
+
+// "hardware": 10 ms period, 15 ms deadline (the design target).
+const TimingProfile& hardware_profile();
+// All profiles, terminated by an entry with name == nullptr.
+const TimingProfile* timing_profiles();
+const TimingProfile* find_timing_profile(const char* name);
+
+// The envelope used by the demo: an 8 x 8 workspace with one no-go zone,
+// with the heartbeat deadline of the given timing profile.
+Envelope default_envelope(const TimingProfile& profile = hardware_profile());
 
 // Absorbs floating-point rounding when a request sits exactly on a limit.
 constexpr double kTolerance = 1e-9;

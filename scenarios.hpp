@@ -16,14 +16,15 @@
 
 namespace surgisafe {
 
-constexpr std::uint64_t kNominalPeriodNs = 10ULL * 1000 * 1000;
 // Cycle at which most faults are injected (cruising along the bottom edge).
 constexpr std::uint32_t kFaultCycle = 50;
 
 enum class ScenarioKind {
     Nominal,
     Jitter,
-    Freeze,
+    FreezeInside,  // Stall that keeps the gap `margin` below the deadline.
+    FreezePast,    // Stall that puts the gap `margin` past the deadline.
+    FreezeLong,    // Stall of twice the deadline.
     Crash,
     Overspeed,
     Reversal,
@@ -39,7 +40,6 @@ struct ScenarioInfo {
     const char* name;
     const char* description;
     ScenarioKind kind;
-    std::uint64_t freeze_ns;  // Extra delay, for Freeze.
     bool expect_stop;
     // Expected reason when expect_stop; StopReason::None means "any reason".
     StopReason expected;
@@ -57,8 +57,10 @@ struct ScenarioStep {
 
 class ScenarioStream {
 public:
+    // Timing scenarios (jitter, freezes) scale with `timing`, so they keep
+    // the same margin to the deadline on every platform.
     ScenarioStream(const ScenarioInfo& info, const Envelope& env,
-                   std::uint64_t seed);
+                   const TimingProfile& timing, std::uint64_t seed);
 
     // Produces the next request; returns false when the controller stops
     // sending (end of path, or a crash).
@@ -71,6 +73,7 @@ private:
 
     ScenarioInfo info_;
     Envelope env_;
+    TimingProfile timing_;
     std::mt19937_64 rng_;
     MotionShaper shaper_;
     std::uint32_t cycle_ = 0;

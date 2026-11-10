@@ -2,11 +2,43 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace surgisafe {
 
-Envelope default_envelope() {
+namespace {
+
+constexpr std::uint64_t kMs = 1000ULL * 1000;
+
+const TimingProfile kProfiles[] = {
+    {"hardware",
+     "Design target: real hardware or the host simulator",
+     10 * kMs, 15 * kMs, 3 * kMs, 2 * kMs},
+    // QNX under QEMU software emulation (TCG) on a desktop host: wake-ups
+    // measured 1.5-2.5 ms late on average with spikes of 7-15 ms, so the
+    // deadline and test margins are widened. Not a real-time platform.
+    {"qemu",
+     "QNX under QEMU software emulation (not real-time)",
+     10 * kMs, 50 * kMs, 20 * kMs, 15 * kMs},
+    {nullptr, nullptr, 0, 0, 0, 0},
+};
+
+} // namespace
+
+const TimingProfile& hardware_profile() { return kProfiles[0]; }
+
+const TimingProfile* timing_profiles() { return kProfiles; }
+
+const TimingProfile* find_timing_profile(const char* name) {
+    for (const TimingProfile* p = kProfiles; p->name; ++p) {
+        if (std::strcmp(p->name, name) == 0) return p;
+    }
+    return nullptr;
+}
+
+Envelope default_envelope(const TimingProfile& profile) {
     Envelope env;
+    env.watchdog_timeout_ns = profile.deadline_ns;
     env.zones[0] = NoGoZone{{5.0, 5.0}, 1.0};
     env.zone_count = 1;
     return env;

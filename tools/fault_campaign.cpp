@@ -6,9 +6,16 @@
 //   build/fault_campaign --trials 1000 --csv build/campaign.csv
 //
 // Simulation model (host only, NOT real-time evidence): the controller
-// sends each scenario step after its gap; the watchdog timer fires at the
-// deadline plus a random timer latency (default 0-200 us). On QNX the same
-// scenarios run through the real controller and monitor processes.
+// releases each scenario step on an absolute schedule (no drift); each
+// request reaches the monitor after a random delivery latency (wake-up,
+// scheduling and IPC delay, default 0-2 ms), and the watchdog timer fires
+// at the deadline plus a random timer latency (default 0-200 us). On QNX
+// the same scenarios run through the real controller and monitor
+// processes.
+//
+// The delivery latency matters: an early version modelled delivery as
+// instant, and scenarios with only 1 ms of margin before the deadline
+// passed here but failed on QNX in QEMU.
 //
 // For every committed move the tool also checks that the instrument stayed
 // inside the envelope; any breach is reported as a failure.
@@ -34,6 +41,10 @@ struct Options {
     int trials = 200;
     std::uint64_t seed = 20261108;
     std::uint64_t max_timer_latency_ns = 200'000;
+    // Defaults to the timing profile's expected latency.
+    std::uint64_t max_delivery_latency_ns = 0;
+    bool delivery_latency_set = false;
+    const TimingProfile* profile = &hardware_profile();
     const char* csv_path = nullptr;
     const char* only = nullptr;
 };
@@ -64,15 +75,18 @@ bool inside_envelope(const Envelope& env, Point p) {
 
 TrialResult run_trial(const ScenarioInfo& info, std::uint64_t seed,
                       const Options& opt) {
-    const Envelope env = default_envelope();
+    const Envelope env = default_envelope(*opt.profile);
     SafetyCore core(env, {env.min_x, env.min_y});
-    ScenarioStream stream(info, env, seed);
+    ScenarioStream stream(info, env, *opt.profile, seed);
     std::mt19937_64 rng(seed ^ 0x9E3779B97F4A7C15ULL);
     std::uniform_int_distribution<std::uint64_t> latency(
         0, opt.max_timer_latency_ns);
+    std::uniform_int_distribution<std::uint64_t> delivery(
+        0, opt.max_delivery_latency_ns);
 
     TrialResult r;
-    std::uint64_t now = 1'000'000'000ULL;
+    std::uint64_t release = 1'000'000'000ULL;  // Controller's schedule.
+    std::uint64_t now = release;
     std::uint64_t last_accept = now;
     int extra_after_stop = 0;
 
@@ -89,7 +103,9 @@ TrialResult run_trial(const ScenarioInfo& info, std::uint64_t seed,
 
     ScenarioStep step{};
     while (stream.next(step)) {
-        const std::uint64_t send_at = now + step.gap_ns;
+        release += step.gap_ns;
+        const std::uint64_t send_at =
+            std::max(now, release + delivery(rng));  // Arrival time.
         // The watchdog timer fires before the request if its (latency-
         // delayed) expiry comes first.
         if (core.watchdog_should_run()) {
@@ -134,6 +150,7 @@ bool trial_passed(const ScenarioInfo& info, const TrialResult& r) {
 void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s [--trials N] [--seed S] [--timer-latency-us U]\n"
+                 "          [--delivery-latency-us U] [--profile hardware|qemu]\n"
                  "          [--scenario NAME] [--csv PATH] [--list]\n",
                  argv0);
 }
@@ -154,6 +171,16 @@ int main(int argc, char** argv) {
             opt.trials = std::atoi(argv[++i]);
         } else if (a == "--seed" && has_value) {
             opt.seed = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--delivery-latency-us" && has_value) {
+            opt.max_delivery_latency_ns =
+                std::strtoull(argv[++i], nullptr, 10) * 1000ULL;
+            opt.delivery_latency_set = true;
+        } else if (a == "--profile" && has_value) {
+            opt.profile = find_timing_profile(argv[++i]);
+            if (!opt.profile) {
+                std::fprintf(stderr, "Unknown profile (try hardware, qemu)\n");
+                return 2;
+            }
         } else if (a == "--timer-latency-us" && has_value) {
             opt.max_timer_latency_ns =
                 std::strtoull(argv[++i], nullptr, 10) * 1000ULL;
@@ -165,6 +192,9 @@ int main(int argc, char** argv) {
             usage(argv[0]);
             return 2;
         }
+    }
+    if (!opt.delivery_latency_set) {
+        opt.max_delivery_latency_ns = opt.profile->expected_latency_ns;
     }
     if (opt.trials <= 0) {
         usage(argv[0]);
@@ -187,10 +217,18 @@ int main(int argc, char** argv) {
     }
 
     std::printf("SurgiSafe-RT fault-injection campaign (simulated time)\n");
-    std::printf("trials/scenario=%d seed=%llu timer latency=0-%llu us\n\n",
+    std::printf("timing profile %s: period %.0f ms, deadline %.0f ms, "
+                "test margin %.0f ms (%s)\n",
+                opt.profile->name, opt.profile->period_ns / 1e6,
+                opt.profile->deadline_ns / 1e6, opt.profile->margin_ns / 1e6,
+                opt.profile->description);
+    std::printf("trials/scenario=%d seed=%llu timer latency=0-%llu us "
+                "delivery latency=0-%llu us\n\n",
                 opt.trials, static_cast<unsigned long long>(opt.seed),
                 static_cast<unsigned long long>(opt.max_timer_latency_ns /
-                                                1000));
+                                                1000),
+                static_cast<unsigned long long>(
+                    opt.max_delivery_latency_ns / 1000));
     std::printf("%-16s %-18s %7s %7s %13s %13s\n", "scenario", "expected",
                 "pass", "fail", "max silence", "moves/trial");
 

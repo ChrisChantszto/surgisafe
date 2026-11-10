@@ -4,13 +4,13 @@
 
 **Educational QNX 8.0 surgical-instrument motion and safety simulation** (no clinical or physical-robot use).
 
-A virtual instrument tip moves in a 2D workspace. An untrusted controller proposes every move; a small QNX safety monitor decides whether it happens. The monitor enforces a *safety envelope*: workspace bounds, a speed limit, an acceleration limit, no-go zones (simple "virtual fixtures"), in-order cycle numbers and a 15 ms heartbeat deadline. Any violation latches a safe stop.
+A virtual instrument tip moves in a 2D workspace. An untrusted controller proposes every move; a small QNX safety monitor decides whether it happens. The monitor enforces a *safety envelope*: workspace bounds, a speed limit, an acceleration limit, no-go zones (simple "virtual fixtures"), in-order cycle numbers and a heartbeat deadline (15 ms on the `hardware` timing profile, the design target; 50 ms on the `qemu` profile used under QEMU software emulation). Any violation latches a safe stop.
 
 Two native QNX processes communicate via `name_attach`/`name_open` and
 `MsgSend`/`MsgReceive`/`MsgReply`:
 
-- `controller`: proposes a movement every 10 ms by replaying one fault-injection scenario (default: a 20 ms freeze at cycle 50).
-- `safety_monitor`: is the *sole owner* of the virtual instrument position; rejects invalid movement requests and latches a safe-stop state when the controller misses its 15 ms heartbeat deadline. The watchdog is a QNX timer (`timer_create` + `SIGEV_PULSE_INIT`) armed with an absolute `CLOCK_MONOTONIC` deadline that delivers a pulse to the monitor's own channel.
+- `controller`: proposes a movement every 10 ms by replaying one fault-injection scenario (default: `freeze_long`, a stall of twice the deadline at cycle 50). `--profile hardware|qemu` must match the monitor.
+- `safety_monitor`: is the *sole owner* of the virtual instrument position; rejects invalid movement requests and latches a safe-stop state when the controller misses its heartbeat deadline (`--profile` selects 15 ms or 50 ms). The watchdog is a QNX timer (`timer_create` + `SIGEV_PULSE_INIT`) armed with an absolute `CLOCK_MONOTONIC` deadline that delivers a pulse to the monitor's own channel.
 - `safety_core.hpp/.cpp`: portable, QNX-free decision logic: the `Envelope` limits, the checks, and the latched safe stop and its reason. No heap allocation after construction. The monitor feeds IPC and timer events into it.
 - `motion_shaper.hpp`: controller-side helper that turns "go to this target" into steps within the speed and acceleration limits (with a 10% margin).
 - `scenarios.hpp/.cpp`: 14 deterministic fault-injection scenarios, shared by the host campaign and the QNX controller.
@@ -60,6 +60,10 @@ build/fault_campaign --list
 ```
 
 Each scenario is checked against its expected outcome (no stop, or a stop with a specific reason), and every committed move is checked against the envelope. Results go to `build/campaign.csv`. The campaign uses **simulated time** (the watchdog timer fires at the deadline plus 0–200 µs of simulated latency), so it verifies the logic, not real-time performance.
+
+## On QNX 8.0 from a Mac (Apple Silicon)
+
+See **[qnx/README.md](qnx/README.md)**: a Docker build container for the SDP, an aarch64le QNX image in QEMU, and one-word commands (`make qnx-boot`, `make qnx-test`, `make qnx-scenarios`). All 55 unit/property tests and every logic scenario pass on QNX; timing under QEMU software emulation is not real-time, and the measured results are documented there.
 
 ## Build (from QNX SDP environment)
 

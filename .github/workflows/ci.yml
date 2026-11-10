@@ -35,7 +35,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: campaign-${{ matrix.os }}-${{ matrix.cxx }}
-          path: build/campaign.csv
+          path: build/campaign*.csv
 
   static-analysis:
     name: Static analysis (cppcheck)

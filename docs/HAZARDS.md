@@ -31,7 +31,7 @@ cycle. All limits live in one `Envelope` struct ([safety_core.hpp](../safety_cor
 | SR-2 | A move is committed only if the target is finite and inside the workspace bounds | H-2 | `inside_bounds`, `SafetyCore::check` |
 | SR-3 | A move is committed only if its cycle number is exactly the next expected one | H-3 | `SafetyCore::check` |
 | SR-4 | Any violation latches a safe stop; no later message can clear it, and the first cause is always reported | H-5 | `SafetyCore::latch` |
-| SR-5 | If no accepted request arrives within 15 ms of the previous accepted one (absolute deadline), the monitor latches a safe stop, whether or not the timer event has been processed yet | H-4 | `SafetyCore::on_tick`, `check`; QNX timer pulse in `WatchdogTimer` ([safety_monitor.cpp](../safety_monitor.cpp)) |
+| SR-5 | If no accepted request arrives within the heartbeat deadline of the previous accepted one (absolute deadline; 15 ms on the `hardware` profile, 50 ms on the `qemu` profile), the monitor latches a safe stop, whether or not the timer event has been processed yet | H-4 | `SafetyCore::on_tick`, `check`; QNX timer pulse in `WatchdogTimer` ([safety_monitor.cpp](../safety_monitor.cpp)) |
 | SR-6 | If the monitor cannot create its watchdog it refuses to start; if it cannot arm it, or starts outside the envelope, it latches a safe stop | H-6 | `main` and `WatchdogTimer` in safety_monitor.cpp; `SafetyCore` constructor and `on_fault` |
 | SR-7 | Only the monitor changes the instrument position; the controller only proposes | H-1–H-8 | Architecture: position lives only in `SafetyCore` |
 | SR-8 | A move is committed only if the step differs from the previous step by ≤ `max_step_change` (0.02) | H-7 | `SafetyCore::check` |
@@ -49,7 +49,7 @@ priority: deadline (SR-5), workspace (SR-2), no-go zone (SR-9), speed
 | SR-2 | `sr2_*` | position always inside the envelope | `leave_workspace`, `nan_command` | same scenarios |
 | SR-3 | `sr3_*` | every accepted move has the expected cycle | `replay`, `skip_cycle` | same scenarios |
 | SR-4 | `sr4_*` | once stopped, state and reason never change | every stop scenario re-sends after the stop | Inspection |
-| SR-5 | `sr5_*` | a tick stops iff the deadline passed; shaped controller never stops over 100,000 cycles | `freeze_4ms` (no stop), `freeze_6ms`, `freeze_20ms`, `crash` | Fault-injection runs; worst-case detection latency measurement |
+| SR-5 | `sr5_*` | a tick stops iff the deadline passed; shaped controller never stops over 100,000 cycles | `jitter`, `freeze_inside` (no stop), `freeze_past`, `freeze_long`, `crash`, each for both timing profiles | `make qnx-scenarios`: all 14 scenarios × 8 runs passed on QNX 8.0 under QEMU (`qemu` profile); worst-case latency on real hardware still to measure |
 | SR-6 | `sr6_*` | a fault always stops | — | Inspection; forced timer failure |
 | SR-7 | All of the above | All of the above | All of the above | Inspection |
 | SR-8 | `sr8_*` | every accepted move obeys the acceleration limit | `reversal` | `./controller --scenario reversal` |

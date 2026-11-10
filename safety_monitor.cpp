@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 
 using namespace surgisafe;
@@ -84,7 +85,23 @@ private:
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // The timing profile sets the heartbeat deadline; the controller must
+    // be started with the same profile.
+    const TimingProfile* profile = &hardware_profile();
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+            profile = find_timing_profile(argv[++i]);
+        } else {
+            profile = nullptr;
+        }
+        if (!profile) {
+            std::fprintf(stderr, "Usage: %s [--profile hardware|qemu]\n",
+                         argv[0]);
+            return 2;
+        }
+    }
+
     name_attach_t* service = name_attach(nullptr, kServiceName, 0);
     if (!service) {
         std::perror("name_attach");
@@ -98,8 +115,10 @@ int main() {
         return 1;
     }
 
-    SafetyCore core;
-    std::puts("Safety monitor ready; awaiting controller");
+    SafetyCore core(default_envelope(*profile));
+    std::printf("Safety monitor ready (profile %s, deadline %.0f ms); "
+                "awaiting controller\n",
+                profile->name, profile->deadline_ns / 1e6);
     std::fflush(stdout);
 
     while (true) {

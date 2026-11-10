@@ -419,6 +419,27 @@ TEST(shaper_output_is_always_accepted_by_monitor) {
     }
 }
 
+// --- Timing profiles -------------------------------------------------------
+
+TEST(timing_profiles_are_consistent) {
+    int count = 0;
+    for (const TimingProfile* p = timing_profiles(); p->name; ++p, ++count) {
+        // A gap "deadline - margin" must still be longer than a period, the
+        // margin must exceed the latency the campaign models, and the
+        // envelope must carry the profile's deadline.
+        CHECK(p->deadline_ns > p->period_ns);
+        CHECK(p->deadline_ns - p->margin_ns > p->period_ns);
+        CHECK(p->margin_ns > p->expected_latency_ns);
+        CHECK(default_envelope(*p).watchdog_timeout_ns == p->deadline_ns);
+        CHECK(find_timing_profile(p->name) == p);
+    }
+    CHECK(count >= 2);
+    CHECK(find_timing_profile("nope") == nullptr);
+    // The design target stays at a 15 ms deadline.
+    CHECK(default_envelope().watchdog_timeout_ns == 15ULL * 1000 * 1000);
+    CHECK(std::string_view(find_timing_profile("qemu")->name) == "qemu");
+}
+
 // --- Misc ------------------------------------------------------------------
 
 TEST(reason_names_and_wire_values) {

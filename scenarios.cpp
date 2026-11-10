@@ -8,39 +8,42 @@ namespace surgisafe {
 
 namespace {
 
-constexpr std::uint64_t kMs = 1000ULL * 1000;
 constexpr std::uint32_t kMaxCycles = 2000;
 
 const ScenarioInfo kScenarios[] = {
     {"nominal", "Trace the workspace edge, on time, within limits",
-     ScenarioKind::Nominal, 0, false, StopReason::None},
-    {"jitter", "Nominal path with send gaps varying between 5 and 14 ms",
-     ScenarioKind::Jitter, 0, false, StopReason::None},
-    {"freeze_4ms", "Controller stalls 4 ms (gap 14 ms, inside the deadline)",
-     ScenarioKind::Freeze, 4 * kMs, false, StopReason::None},
-    {"freeze_6ms", "Controller stalls 6 ms (gap 16 ms, misses the deadline)",
-     ScenarioKind::Freeze, 6 * kMs, true, StopReason::WatchdogTimeout},
-    {"freeze_20ms", "Controller stalls 20 ms",
-     ScenarioKind::Freeze, 20 * kMs, true, StopReason::WatchdogTimeout},
+     ScenarioKind::Nominal, false, StopReason::None},
+    // Timing scenarios scale with the timing profile and keep `margin`
+    // either side of the deadline, so delivery latency (wake-up,
+    // scheduling, IPC) cannot flip the expected outcome. With only 1 ms of
+    // margin, runs on QNX in QEMU failed.
+    {"jitter", "Send gaps vary between half a period and deadline - margin",
+     ScenarioKind::Jitter, false, StopReason::None},
+    {"freeze_inside", "Stall leaving the gap a margin inside the deadline",
+     ScenarioKind::FreezeInside, false, StopReason::None},
+    {"freeze_past", "Stall putting the gap a margin past the deadline",
+     ScenarioKind::FreezePast, true, StopReason::WatchdogTimeout},
+    {"freeze_long", "Stall of twice the deadline",
+     ScenarioKind::FreezeLong, true, StopReason::WatchdogTimeout},
     {"crash", "Controller stops sending at cycle 50",
-     ScenarioKind::Crash, 0, true, StopReason::WatchdogTimeout},
+     ScenarioKind::Crash, true, StopReason::WatchdogTimeout},
     {"overspeed", "One step 1.5x longer than the speed limit",
-     ScenarioKind::Overspeed, 0, true, StopReason::SpeedLimit},
+     ScenarioKind::Overspeed, true, StopReason::SpeedLimit},
     {"reversal", "Instant reversal at cruise speed (too much acceleration)",
-     ScenarioKind::Reversal, 0, true, StopReason::AccelLimit},
+     ScenarioKind::Reversal, true, StopReason::AccelLimit},
     {"leave_workspace", "Step below the workspace floor",
-     ScenarioKind::LeaveWorkspace, 0, true, StopReason::OutOfWorkspace},
+     ScenarioKind::LeaveWorkspace, true, StopReason::OutOfWorkspace},
     {"nan_command", "Proposed position is NaN",
-     ScenarioKind::NaNCommand, 0, true, StopReason::OutOfWorkspace},
+     ScenarioKind::NaNCommand, true, StopReason::OutOfWorkspace},
     {"replay", "Re-sends the previous cycle number",
-     ScenarioKind::Replay, 0, true, StopReason::InvalidSequence},
+     ScenarioKind::Replay, true, StopReason::InvalidSequence},
     {"skip_cycle", "Skips a cycle number",
-     ScenarioKind::SkipCycle, 0, true, StopReason::InvalidSequence},
+     ScenarioKind::SkipCycle, true, StopReason::InvalidSequence},
     {"nogo_intrusion", "Heads straight for the no-go zone",
-     ScenarioKind::NoGoIntrusion, 0, true, StopReason::NoGoZone},
+     ScenarioKind::NoGoIntrusion, true, StopReason::NoGoZone},
     {"rogue_ai", "From cycle 50, random and hostile proposals every cycle",
-     ScenarioKind::RogueAI, 0, true, StopReason::None},
-    {nullptr, nullptr, ScenarioKind::Nominal, 0, false, StopReason::None},
+     ScenarioKind::RogueAI, true, StopReason::None},
+    {nullptr, nullptr, ScenarioKind::Nominal, false, StopReason::None},
 };
 
 } // namespace
@@ -55,8 +58,9 @@ const ScenarioInfo* find_scenario(const char* name) {
 }
 
 ScenarioStream::ScenarioStream(const ScenarioInfo& info, const Envelope& env,
-                               std::uint64_t seed)
-    : info_(info), env_(env), rng_(seed), shaper_(env, {env.min_x, env.min_y}) {}
+                               const TimingProfile& timing, std::uint64_t seed)
+    : info_(info), env_(env), timing_(timing), rng_(seed),
+      shaper_(env, {env.min_x, env.min_y}) {}
 
 Point ScenarioStream::nominal_target() {
     if (info_.kind == ScenarioKind::NoGoIntrusion && env_.zone_count > 0) {
@@ -75,10 +79,14 @@ bool ScenarioStream::next(ScenarioStep& out) {
         return false;
     }
 
-    out.gap_ns = kNominalPeriodNs;
+    const std::uint64_t period = timing_.period_ns;
+    const std::uint64_t deadline = env_.watchdog_timeout_ns;
+    const std::uint64_t margin = timing_.margin_ns;
+    out.gap_ns = period;
     out.cycle = cycle_;
     if (info_.kind == ScenarioKind::Jitter) {
-        std::uniform_int_distribution<std::uint64_t> gap(5 * kMs, 14 * kMs);
+        std::uniform_int_distribution<std::uint64_t> gap(period / 2,
+                                                          deadline - margin);
         out.gap_ns = gap(rng_);
     }
 
@@ -89,7 +97,10 @@ bool ScenarioStream::next(ScenarioStep& out) {
 
     if (cycle_ == kFaultCycle) {
         switch (info_.kind) {
-        case ScenarioKind::Freeze: out.gap_ns += info_.freeze_ns; break;
+        // Freezes set the whole gap, relative to the deadline.
+        case ScenarioKind::FreezeInside: out.gap_ns = deadline - margin; break;
+        case ScenarioKind::FreezePast: out.gap_ns = deadline + margin; break;
+        case ScenarioKind::FreezeLong: out.gap_ns = period + 2 * deadline; break;
         case ScenarioKind::Overspeed: {
             const double s = std::hypot(v.x, v.y);
             const double k = s > 0.0 ? 1.5 * env_.max_step / s : 0.0;

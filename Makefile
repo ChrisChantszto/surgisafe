@@ -56,12 +56,15 @@ test: $(BUILD)/safety_core_test
 TRIALS ?= 200
 .PHONY: campaign
 campaign: $(BUILD)/fault_campaign
-	./$(BUILD)/fault_campaign --trials $(TRIALS) --csv $(BUILD)/campaign.csv
+	./$(BUILD)/fault_campaign --trials $(TRIALS) --profile hardware --csv $(BUILD)/campaign.csv
+	./$(BUILD)/fault_campaign --trials $(TRIALS) --profile qemu --csv $(BUILD)/campaign-qemu.csv
 
 # ---- QNX -----------------------------------------------------------------
 QCC ?= q++
 QNX_VARIANT ?= gcc_ntox86_64
-QNX_CXXFLAGS := -V$(QNX_VARIANT) -std=c++17 -O2 -Wall -Wextra -pthread -I.
+# _QNX_SOURCE exposes POSIX timers and QNX extensions (SIGEV_PULSE_INIT,
+# ...) that strict ISO mode hides in the QNX headers.
+QNX_CXXFLAGS := -V$(QNX_VARIANT) -std=gnu++17 -D_QNX_SOURCE -O2 -Wall -Wextra -Werror -I.
 
 $(BUILD)/qnx/safety_monitor: safety_monitor.cpp $(CORE_SRC) $(CORE_HDR) protocol.hpp
 	@mkdir -p $(BUILD)/qnx
@@ -71,8 +74,35 @@ $(BUILD)/qnx/controller: controller.cpp $(SCEN_SRC) $(SCEN_HDR) $(CORE_SRC) $(CO
 	@mkdir -p $(BUILD)/qnx
 	$(QCC) $(QNX_CXXFLAGS) controller.cpp $(SCEN_SRC) $(CORE_SRC) -o $@
 
+# The host unit/property tests, built for QNX so they can run on the target.
+$(BUILD)/qnx/safety_core_test: $(TEST_SRC) $(TEST_HDR) $(CORE_SRC) $(CORE_HDR) $(LIVE_SRC) $(LIVE_HDR) net/sha1.cpp net/sha1.hpp
+	@mkdir -p $(BUILD)/qnx
+	$(QCC) $(QNX_CXXFLAGS) $(TEST_SRC) $(CORE_SRC) $(LIVE_SRC) net/sha1.cpp -o $@
+
 .PHONY: qnx
-qnx: $(BUILD)/qnx/safety_monitor $(BUILD)/qnx/controller
+qnx: $(BUILD)/qnx/safety_monitor $(BUILD)/qnx/controller $(BUILD)/qnx/safety_core_test
+
+# ---- QNX workflow, run from the Mac ---------------------------------------
+# Needs the qnx-build container (qnx/docker/setup.sh) with the SDP in
+# ~/qnx800, and QEMU (brew install qemu). See qnx/README.md.
+QNX_TARGET_VARIANT ?= gcc_ntoaarch64le
+REPO_IN_CONTAINER := /home/$(shell id -un)$(subst $(HOME),,$(CURDIR))
+REPEATS ?= 3
+PROFILE ?= qemu
+
+.PHONY: qnx-build qnx-image qnx-boot qnx-deploy qnx-test qnx-scenarios
+qnx-build:
+	docker exec qnx-build bash -c 'source ~/qnx800/qnxsdp-env.sh > /dev/null && cd "$(REPO_IN_CONTAINER)" && make qnx QNX_VARIANT=$(QNX_TARGET_VARIANT)'
+qnx-image:
+	qnx/vm/image.sh
+qnx-boot:
+	qnx/vm/boot.sh
+qnx-deploy: qnx-build
+	qnx/vm/target.sh deploy
+qnx-test: qnx-deploy
+	qnx/vm/target.sh ssh /data/surgisafe/safety_core_test
+qnx-scenarios: qnx-deploy
+	qnx/vm/target.sh ssh /data/surgisafe/scenarios_on_target.sh $(REPEATS) $(PROFILE)
 
 .PHONY: clean
 clean:
